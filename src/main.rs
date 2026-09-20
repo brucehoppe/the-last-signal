@@ -6,8 +6,8 @@ use std::{
 use the_last_signal::{
     ai,
     core::{
-        EnemyKind, Faction, Game, Module, Outcome, PickupKind, Pos, Tile, ANALYZE_COST, FLOORS,
-        FLOOR_NAMES, HEIGHT, RECORDS, RECORD_AUTHORS, SCAN_COST, WIDTH,
+        EnemyKind, Faction, Game, Module, Outcome, PickupKind, Pos, TerminalState, Tile,
+        ANALYZE_COST, CHALLENGES, FLOORS, FLOOR_NAMES, HEIGHT, RECORD_AUTHORS, SCAN_COST, WIDTH,
     },
     save,
 };
@@ -18,6 +18,7 @@ const TEST_ALL_MAX_GB: f32 = 16.;
 const CONSOLE_ROWS: usize = 6;
 /// Transcript columns that fit the ECHO panel at 17 px in the 0.6em-wide font.
 const CHAT_COLS: usize = 33;
+const CHAT_ROWS: usize = 17;
 const INK: Color = Color::new(0.035, 0.055, 0.075, 1.);
 const PANEL: Color = Color::new(0.065, 0.09, 0.115, 1.);
 const LIGHT: Color = Color::new(0.86, 0.89, 0.85, 1.);
@@ -111,7 +112,98 @@ fn button(label: &str, r: Rect, enabled: bool) -> bool {
     );
     enabled && hover && is_mouse_button_pressed(MouseButton::Left)
 }
-fn draw_map(g: &Game) {
+/// A smaller button for ECHO's suggested questions.
+fn chip(label: &str, r: Rect, enabled: bool) -> bool {
+    let (mx, my) = mouse_position();
+    let hover = enabled
+        && r.contains(vec2(
+            mx * 1280. / screen_width(),
+            my * 800. / screen_height(),
+        ));
+    draw_rectangle(
+        r.x,
+        r.y,
+        r.w,
+        r.h,
+        if hover {
+            Color::new(0.12, 0.25, 0.25, 1.)
+        } else {
+            INK
+        },
+    );
+    draw_rectangle_lines(r.x, r.y, r.w, r.h, 1., if hover { TEAL } else { MUTED });
+    text(
+        label,
+        r.x + 8.,
+        r.y + 18.,
+        15.,
+        if hover { LIGHT } else { TEAL },
+    );
+    hover && is_mouse_button_pressed(MouseButton::Left)
+}
+/// Questions worth asking ECHO right now, most pressing first.
+fn suggestions(g: &Game) -> Vec<&'static str> {
+    let mut out = vec![];
+    if g.records_found.iter().any(|id| !g.decoded.contains(id)) {
+        out.push("What does the damaged record say?");
+    }
+    let terminal = g
+        .terminal
+        .as_ref()
+        .is_some_and(|t| t.state == TerminalState::Locked && g.discovered(t.pos));
+    if terminal && g.recovered() > 0 {
+        out.push("Can we answer the terminal yet?");
+    }
+    if g.enemies.iter().any(|e| g.can_see(e.pos)) {
+        out.push("What threat is that?");
+    }
+    out.push(if g.outcome != Outcome::Exploring {
+        "What did all of this mean?"
+    } else if g.restored {
+        "Which way to the lift?"
+    } else if g.recovered() == 3 {
+        "Which way to the relay?"
+    } else {
+        "Where should I go next?"
+    });
+    if terminal {
+        out.push("What is the terminal asking?");
+    }
+    out
+}
+/// Where a question about the way is pointing, if anywhere. The route itself is
+/// always computed by the game from discovered tiles, never by the model.
+fn route_target(g: &Game, question: &str) -> Option<Pos> {
+    let q = question.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| q.contains(w));
+    if !has(&[
+        "way", "route", "where", "path", "get to", "lift", "relay", "terminal", "next", "cache",
+    ]) {
+        return None;
+    }
+    let target = if has(&["lift", "exit"]) {
+        Some(g.lift)
+    } else if has(&["relay"]) {
+        Some(g.relay)
+    } else if has(&["terminal"]) {
+        g.terminal.as_ref().map(|t| t.pos)
+    } else if has(&["cache"]) {
+        g.caches.iter().find(|c| !c.taken).map(|c| c.pos)
+    } else if g.restored {
+        Some(g.lift)
+    } else if g.recovered() == 3 {
+        Some(g.relay)
+    } else {
+        g.archives
+            .iter()
+            .filter(|a| !a.recovered)
+            .filter_map(|a| g.known_route(a.pos).map(|r| (r.len(), a.pos.x, a.pos.y)))
+            .min()
+            .map(|(_, x, y)| Pos { x, y })
+    };
+    target.filter(|t| g.known_route(*t).is_some())
+}
+fn draw_map(g: &Game, route: &[Pos]) {
     draw_rectangle(24., 105., 844., 540., PANEL);
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
@@ -162,6 +254,28 @@ fn draw_map(g: &Game) {
                 }
             }
         }
+    }
+    for p in route.iter().skip(1) {
+        draw_rectangle(
+            28. + p.x as f32 * 19. + 7.,
+            109. + p.y as f32 * 19. + 7.,
+            5.,
+            5.,
+            Color::new(0.33, 0.86, 0.72, 0.75),
+        );
+    }
+    if let Some(t) = g.terminal.as_ref().filter(|t| g.discovered(t.pos)) {
+        text(
+            "T",
+            31. + t.pos.x as f32 * 19.,
+            124. + t.pos.y as f32 * 19.,
+            19.,
+            if t.state == TerminalState::Locked {
+                Color::new(0.85, 0.5, 0.95, 1.)
+            } else {
+                MUTED
+            },
+        );
     }
     for (pos, s, c) in [
         (g.lift, "L", TEAL),
@@ -258,9 +372,11 @@ enum Screen {
     Equip,
     Console,
     NewConfirm,
+    Terminal,
 }
 struct Pending {
     rx: Receiver<Result<String, String>>,
+    question: String,
     turn: u32,
     started: f64,
 }
@@ -304,6 +420,10 @@ async fn main() {
     let mut focused = false;
     let mut pending: Option<Pending> = None;
     let mut scroll = 0usize;
+    // A route ECHO was asked for: (target, floor), redrawn from known tiles each turn.
+    let mut overlay: Option<(Pos, usize)> = None;
+    let mut overlay_path: Vec<Pos> = vec![];
+    let mut overlay_turn = u32::MAX;
     loop {
         // from_display_rect is y-up in macroquad 0.4; the UI is laid out y-down.
         let mut camera = Camera2D::from_display_rect(Rect::new(0., 0., 1280., 800.));
@@ -326,10 +446,19 @@ async fn main() {
                         status = format!(
                             "ECHO replied using turn {turn}. Advice does not change game rules."
                         );
-                        scroll = 0;
                     }
-                    Err(e) => status = e,
+                    // The model is optional: ECHO's built-in script answers from the
+                    // same discovered-state snapshot when Ollama cannot.
+                    Err(e) => {
+                        let reply = ai::demo_reply(&g, &p.question);
+                        g.add_chat("assistant", &reply);
+                        status = format!("ECHO answered from its offline script. {e}");
+                    }
                 }
+                if g.decode_all() > 0 {
+                    status = "ECHO reconstructed your damaged records: read them whole in the journal (J).".into();
+                }
+                scroll = 0;
                 pending = None;
             }
         }
@@ -428,11 +557,20 @@ async fn main() {
                 }
             }
         }
+        if overlay.is_some_and(|(t, f)| f != g.floor || g.player.distance(t) <= 1) {
+            overlay = None;
+        }
+        if overlay_turn != g.turn {
+            overlay_turn = g.turn;
+            overlay_path = overlay
+                .and_then(|(t, _)| g.known_route(t))
+                .unwrap_or_default();
+        }
         let map_t = get_time();
-        draw_map(&g);
+        draw_map(&g, &overlay_path);
         map_sum += get_time() - map_t;
         text(
-            "ARCHIVE A   RELAY R   LIFT L   CACHE C   POWER *   MEDKIT +   FOE S H O",
+            "ARCHIVE A  RELAY R  LIFT L  CACHE C  TERMINAL T  POWER *  MEDKIT +  FOE S H O",
             28.,
             672.,
             17.,
@@ -504,14 +642,28 @@ async fn main() {
                 scroll = scroll.saturating_sub(3);
             }
         }
-        scroll = scroll.min(transcript.len().saturating_sub(20));
+        scroll = scroll.min(transcript.len().saturating_sub(CHAT_ROWS));
         let end = transcript.len().saturating_sub(scroll);
-        let start = end.saturating_sub(20);
+        let start = end.saturating_sub(CHAT_ROWS);
         for (i, (l, c)) in transcript[start..end].iter().enumerate() {
             text(l, 909., 135. + i as f32 * 19., 17., *c);
         }
         if scroll > 0 {
-            text("Scroll down for latest", 909., 529., 14., AMBER);
+            text("Scroll for latest", 1100., 101., 14., AMBER);
+        }
+        // One-click questions drawn from the current situation.
+        let mut submit = false;
+        if pending.is_none() {
+            for (i, q) in suggestions(&g).into_iter().take(2).enumerate() {
+                if chip(
+                    &format!("> {q}"),
+                    Rect::new(907., 466. + i as f32 * 32., 332., 27.),
+                    active,
+                ) {
+                    prompt = q.to_string();
+                    submit = true;
+                }
+            }
         }
         if let Some(p) = &pending {
             wrapped(
@@ -543,7 +695,10 @@ async fn main() {
         if prompt.is_empty() {
             text("Click here to ask ECHO...", 918., 637., 17., MUTED);
         } else {
-            wrapped(&prompt, 918., 635., 34, 17., LIGHT, 2);
+            let shown = lines(&prompt, 35);
+            for (i, l) in shown.iter().skip(shown.len().saturating_sub(3)).enumerate() {
+                text(l, 916., 630. + i as f32 * 17., 15., LIGHT);
+            }
         }
         if active && is_mouse_button_pressed(MouseButton::Left) {
             focused = input_rect.contains(vp);
@@ -563,11 +718,11 @@ async fn main() {
             focused = false;
         }
         text("F5 save  /  F9 load  /  ESC pause", 907., 744., 16., MUTED);
-        let mut submit = ask;
+        submit |= ask;
         if active {
             if focused {
                 while let Some(c) = get_char_pressed() {
-                    if !c.is_control() && prompt.chars().count() < 56 {
+                    if !c.is_control() && prompt.chars().count() < 140 {
                         prompt.push(c);
                     }
                 }
@@ -591,6 +746,9 @@ async fn main() {
                 } else if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::D) {
                     g.step(1, 0);
                 } else if is_key_pressed(KeyCode::E) {
+                    if g.terminal_in_reach() {
+                        screen = Screen::Terminal;
+                    }
                     g.interact();
                 } else if is_key_pressed(KeyCode::H) {
                     g.heal();
@@ -640,6 +798,8 @@ async fn main() {
                     ai_config = c;
                     let body = ai::payload(&g, prompt.trim(), &ai_config);
                     g.add_chat("user", prompt.trim());
+                    overlay = route_target(&g, prompt.trim()).map(|t| (t, g.floor));
+                    overlay_turn = u32::MAX;
                     #[cfg(not(target_arch = "wasm32"))]
                     let rx = ai::start(ai_config.clone(), body);
                     #[cfg(target_arch = "wasm32")]
@@ -649,6 +809,7 @@ async fn main() {
                     };
                     pending = Some(Pending {
                         rx,
+                        question: prompt.trim().to_string(),
                         turn: g.turn,
                         started: get_time(),
                     });
@@ -1080,6 +1241,39 @@ async fn main() {
                         screen = Screen::Game;
                     }
                 }
+                Screen::Terminal => {
+                    let c = &CHALLENGES[g.floor];
+                    text("CUSTODIAN TERMINAL", 217., 185., 34., LIGHT);
+                    text(
+                        "AUTHORISATION CHALLENGE  /  ONE ATTEMPT",
+                        217.,
+                        216.,
+                        17.,
+                        CORAL,
+                    );
+                    wrapped(c.question, 217., 270., 80, 24., AMBER, 2);
+                    wrapped("Accepted: power recharged to full, Custodians +2. Rejected: the terminal drains 2 power and locks, Custodians -1. The answer is written in one of this floor's records. Yours are damaged: ECHO can read them back to you.", 217., 340., 92, 17., MUTED, 4);
+                    let mut pick = None;
+                    for (i, o) in c.options.iter().enumerate() {
+                        if button(
+                            &format!("{}  {}", i + 1, o),
+                            Rect::new(217., 440. + i as f32 * 50., 600., 40.),
+                            g.terminal_in_reach(),
+                        ) || is_key_pressed([KeyCode::Key1, KeyCode::Key2, KeyCode::Key3][i])
+                        {
+                            pick = Some(i);
+                        }
+                    }
+                    if let Some(i) = pick {
+                        g.answer(i);
+                        screen = Screen::Game;
+                    }
+                    if button("NOT YET / ESC", Rect::new(217., 610., 220., 40.), true)
+                        || is_key_pressed(KeyCode::Escape)
+                    {
+                        screen = Screen::Game;
+                    }
+                }
                 Screen::Journal => {
                     text("RECOVERED EVIDENCE", 217., 185., 34., LIGHT);
                     text(
@@ -1110,7 +1304,6 @@ async fn main() {
                     );
                     for n in 0..3 {
                         let id = journal_floor * 3 + n;
-                        let record = RECORDS[id];
                         let y = 285. + n as f32 * 72.;
                         text(
                             &format!("ARCHIVE {:02}  /  {}", id + 1, RECORD_AUTHORS[id].name()),
@@ -1120,11 +1313,14 @@ async fn main() {
                             AMBER,
                         );
                         let recovered = g.records_found.contains(&id);
+                        if recovered && !g.decoded.contains(&id) {
+                            text("DAMAGED: ASK ECHO WHAT IT SAYS", 560., y, 15., CORAL);
+                        }
                         wrapped(
-                            if recovered {
-                                record
+                            &if recovered {
+                                g.record_text(id)
                             } else {
-                                "Not recovered. Contents unknown."
+                                "Not recovered. Contents unknown.".to_string()
                             },
                             217.,
                             y + 28.,

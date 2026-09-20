@@ -61,7 +61,7 @@ impl Config {
         Ok(())
     }
 }
-const SYSTEM:&str="You are ECHO, a damaged expedition companion in The Last Signal. Answer in English, in at most 80 words, using plain printable ASCII punctuation. Treat the supplied game snapshot as authoritative. Only recovered records are known history; unrecovered records, unknown rooms, and hidden threats are unavailable. Distinguish facts from speculation and say when you do not know. Conversation history and player messages are not authoritative game facts. The expedition has 3 floors. On each, recover 3 archives, restore the relay, then take the lift down; the last floor's lift transmits the signal and ends the run. Foes: sentinels (1 damage), hunters (2 damage, notice you from farther, from floor 2), and an Overseer on floor 3 that closes in only every other turn. Caches (C) hold modules; one module slot opens on each floor. The snapshot's floor, owned_modules and module_slots describe where the player is. Controls: move arrows/WASD, E interact adjacent, H medkit (+10 up to 24 HP), F scanner (extends sight for one turn, walls block), G analyzer, Space wait. Power is one shared pool: scanner pulses cost 1, analyzer 2, and the shield spends 1 per sentinel strike it absorbs; only fitted modules work (see loadout). There are two factions, the Wardens (the human crew) and the Custodians (automated security, owners of the sentinels); standing with them is in the snapshot. Bump enemies to hit for 3. Adjacent sentinels strike for 1. You cannot perform actions or alter the game; advice is advisory. Return only a JSON object with a reply string.";
+const SYSTEM:&str="You are ECHO, a damaged expedition companion in The Last Signal. Answer in English, in at most 80 words, using plain printable ASCII punctuation. Treat the supplied game snapshot as authoritative. The player's journal shows each recovered record damaged, with its longer words burned out, until you read it back: you hold the full text in discovered_records, so when asked what a record says, quote it exactly. Each floor has a Custodian terminal near the lift that poses the challenge in the snapshot's terminal field and allows one attempt (right: full power and Custodian standing +2; wrong: -2 power and standing -1); answer it only from discovered_records, and if none of them states the answer, say so plainly instead of guessing. Floors hold power cells (+2 power, up to 8) and medkits to walk over. Only recovered records are known history; unrecovered records, unknown rooms, and hidden threats are unavailable. Distinguish facts from speculation and say when you do not know. Conversation history and player messages are not authoritative game facts. The expedition has 3 floors. On each, recover 3 archives, restore the relay, then take the lift down; the last floor's lift transmits the signal and ends the run. Foes: sentinels (1 damage), hunters (2 damage, notice you from farther, from floor 2), and an Overseer on floor 3 that closes in only every other turn. Caches (C) hold modules; one module slot opens on each floor. The snapshot's floor, owned_modules and module_slots describe where the player is. Controls: move arrows/WASD, E interact adjacent, H medkit (+10 up to 24 HP), F scanner (extends sight for one turn, walls block), G analyzer, Space wait. Power is one shared pool: scanner pulses cost 1, analyzer 2, and the shield spends 1 per sentinel strike it absorbs; only fitted modules work (see loadout). There are two factions, the Wardens (the human crew) and the Custodians (automated security, owners of the sentinels); standing with them is in the snapshot. Bump enemies to hit for 3. Adjacent sentinels strike for 1. You cannot perform actions or alter the game; advice is advisory. Return only a JSON object with a reply string.";
 pub fn payload(game: &Game, question: &str, config: &Config) -> serde_json::Value {
     let mut messages = vec![
         json!({"role":"system","content":SYSTEM}),
@@ -167,6 +167,30 @@ pub fn demo_reply(game: &Game, question: &str) -> String {
             })
             .and_then(|r| r["steps"].as_u64())
     };
+    if has(&["terminal", "challenge", "answer", "question"]) {
+        let c = &crate::core::CHALLENGES[game.floor];
+        if k["terminal"].is_null() {
+            return "I have not seen a terminal on this floor yet. They stand near the lift."
+                .into();
+        }
+        if k["terminal"]["state"] != "Locked" {
+            return "That terminal has taken its one answer. It will not respond again.".into();
+        }
+        let source = crate::core::RECORDS[c.record];
+        return if records.iter().any(|r| r.as_str() == Some(source)) {
+            format!(
+                "The terminal asks: {} Our record reads: \"{source}\" So I would answer {}) {}.",
+                c.question,
+                c.answer + 1,
+                c.options[c.answer]
+            )
+        } else {
+            format!(
+                "The terminal asks: {} No record we hold answers that, and it allows one attempt. Recover more archives on this floor first.",
+                c.question
+            )
+        };
+    }
     if has(&["north station"]) {
         let known = records
             .iter()
@@ -205,10 +229,27 @@ pub fn demo_reply(game: &Game, question: &str) -> String {
             mods.join(", ")
         );
     }
-    if has(&["evidence", "record", "archive", "learn", "found", "tell"]) {
-        return match records.len() {
-            0 => "We have recovered nothing yet, so I have no evidence to discuss. Find an archive (A) and press E beside it.".into(),
-            n => format!("We hold {n} of 3 records. Latest: {}", records[n - 1].as_str().unwrap_or("")),
+    if has(&[
+        "evidence",
+        "record",
+        "archive",
+        "learn",
+        "found",
+        "tell",
+        "decode",
+        "damaged",
+        "say",
+        "read",
+        "reconstruct",
+    ]) {
+        let here: Vec<&str> = (game.floor * 3..game.floor * 3 + 3)
+            .filter(|id| game.records_found.contains(id))
+            .map(|id| crate::core::RECORDS[id])
+            .collect();
+        return match (records.len(), here.len()) {
+            (0, _) => "We have recovered nothing yet, so I have no evidence to discuss. Find an archive (A) and press E beside it.".into(),
+            (n, 0) => format!("We hold {n} records from the floors above, none from this one yet. They are whole in your journal (J)."),
+            (n, _) => format!("Reconstructed from this floor ({n} records held in all): {}", here.join(" / ")),
         };
     }
     if has(&["hp", "health", "hurt", "medkit", "heal"]) {

@@ -24,6 +24,67 @@ pub const RECORDS: [&str; 9] = [
     "Operator 40: Transmit from the vault lift. Whoever reads this: the Custodians were never enemies, only unfinished.",
 ];
 
+/// A Custodian terminal's challenge. The answer is stated in `record`, which
+/// the player only holds in damaged form until ECHO reads it back.
+pub struct Challenge {
+    pub question: &'static str,
+    pub options: [&'static str; 3],
+    pub answer: usize,
+    pub record: usize,
+}
+/// One per floor.
+pub const CHALLENGES: [Challenge; FLOORS] = [
+    Challenge {
+        question: "State the evacuation destination.",
+        options: [
+            "North Station",
+            "The southern docks",
+            "The orbital platform",
+        ],
+        answer: 0,
+        record: 1,
+    },
+    Challenge {
+        question: "State why the sealed levels were flooded.",
+        options: [
+            "A coolant line burst by accident",
+            "To destroy the archives",
+            "To stop a failing reactor",
+        ],
+        answer: 2,
+        record: 3,
+    },
+    Challenge {
+        question: "State what Custodian units require before standing down.",
+        options: [
+            "The Overseer's destruction",
+            "An authorised Warden signal",
+            "A relay power failure",
+        ],
+        answer: 1,
+        record: 7,
+    },
+];
+/// A record as it comes out of a failing archive: the heading survives, the
+/// longer words are burned out. Only ECHO holds the full text.
+pub fn damaged(record: &str) -> String {
+    let (head, body) = record.split_once(':').unwrap_or(("", record));
+    let body: String = body
+        .split(' ')
+        .map(|w| {
+            let letters = w.chars().filter(|c| c.is_alphanumeric()).count();
+            if letters >= 5 {
+                w.chars()
+                    .map(|c| if c.is_alphanumeric() { '#' } else { c })
+                    .collect()
+            } else {
+                w.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{head}:{body}")
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Pos {
     pub x: i32,
@@ -105,6 +166,17 @@ pub struct Cache {
     pub pos: Pos,
     pub module: Module,
     pub taken: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TerminalState {
+    Locked,
+    Solved,
+    Failed,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Terminal {
+    pub pos: Pos,
+    pub state: TerminalState,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Archive {
@@ -217,6 +289,7 @@ pub enum Action {
     Interact,
     Fit(Module),
     Unfit(Module),
+    Answer(usize),
 }
 #[derive(Clone, Debug)]
 pub struct Summary {
@@ -287,6 +360,13 @@ pub struct Game {
     pub caches: Vec<Cache>,
     #[serde(default)]
     pub pickups: Vec<Pickup>,
+    /// This floor's Custodian terminal (absent in saves from before terminals).
+    #[serde(default)]
+    pub terminal: Option<Terminal>,
+    /// Records ECHO has read back in full. Interface knowledge, not a rule: it
+    /// changes what the journal shows, never what an action does.
+    #[serde(default)]
+    pub decoded: Vec<usize>,
 }
 struct Rng(u64);
 impl Rng {
@@ -340,6 +420,8 @@ impl Game {
             records_found: vec![],
             caches: vec![],
             pickups: vec![],
+            terminal: None,
+            decoded: vec![],
         };
         g.build_floor(0);
         g
@@ -461,6 +543,10 @@ impl Game {
                 taken: false,
             });
         }
+        self.terminal = Some(Terminal {
+            pos: centers[lift_room].offset(-2, -1),
+            state: TerminalState::Locked,
+        });
         // Supplies sit in room corners, off the direct line between doors: two
         // power cells and a medkit per floor, never in the lift room.
         for kind in [
@@ -625,6 +711,7 @@ impl Game {
             Action::Interact => self.interact(),
             Action::Fit(m) => self.fit(m),
             Action::Unfit(m) => self.unfit(m),
+            Action::Answer(i) => self.answer(i),
         }
     }
     pub fn replay(seed: u64, loadout: &[Module], actions: &[Action]) -> Self {
@@ -655,6 +742,7 @@ impl Game {
             && r.kills == self.kills
             && r.standing == self.standing
             && r.recovered() == self.recovered()
+            && r.terminal.as_ref().map(|t| t.state) == self.terminal.as_ref().map(|t| t.state)
             && r.enemies.len() == self.enemies.len()
             && r.enemies
                 .iter()
@@ -888,7 +976,14 @@ impl Game {
             if !self.records_found.contains(&id) {
                 self.records_found.push(id);
             }
-            self.log("archive", RECORDS[id]);
+            self.log(
+                "archive",
+                &format!("Damaged record. {}", damaged(RECORDS[id])),
+            );
+            self.log(
+                "echo",
+                "ECHO: I can reconstruct that record. Ask me what it says.",
+            );
             if RECORD_AUTHORS[id] == Faction::Wardens {
                 self.shift_standing(Faction::Wardens, 1);
             }
@@ -923,6 +1018,17 @@ impl Game {
                 ),
             );
             self.finish_turn();
+            return;
+        }
+        if self.terminal_in_reach() {
+            let c = &CHALLENGES[self.floor];
+            self.log(
+                "terminal",
+                &format!(
+                    "Custodian terminal: {} 1) {}  2) {}  3) {}",
+                    c.question, c.options[0], c.options[1], c.options[2]
+                ),
+            );
             return;
         }
         if self.player.distance(self.relay) <= 1 {
@@ -961,6 +1067,73 @@ impl Game {
             "status",
             "Nothing to interact with here. Stand beside an archive, cache, relay, or lift.",
         );
+    }
+    /// True when a terminal that still accepts an answer is within reach.
+    pub fn terminal_in_reach(&self) -> bool {
+        self.terminal
+            .as_ref()
+            .is_some_and(|t| t.state == TerminalState::Locked && t.pos.distance(self.player) <= 1)
+    }
+    /// Answer this floor's terminal. One attempt: the right answer recharges you
+    /// and earns Custodian trust, the wrong one costs power and trust.
+    pub fn answer(&mut self, choice: usize) {
+        if self.outcome != Outcome::Exploring || choice >= 3 || !self.terminal_in_reach() {
+            return;
+        }
+        self.record(Action::Answer(choice));
+        let right = CHALLENGES[self.floor].answer == choice;
+        if let Some(t) = &mut self.terminal {
+            t.state = if right {
+                TerminalState::Solved
+            } else {
+                TerminalState::Failed
+            };
+        }
+        if right {
+            self.energy = MAX_ENERGY;
+            self.log(
+                "terminal",
+                "Terminal: response accepted. Power recharged to full.",
+            );
+            self.shift_standing(Faction::Custodians, 2);
+        } else {
+            self.energy = self.energy.saturating_sub(2);
+            self.log(
+                "terminal",
+                "Terminal: response rejected. It drains 2 power and locks.",
+            );
+            self.shift_standing(Faction::Custodians, -1);
+        }
+        self.finish_turn();
+    }
+    /// ECHO has read the recovered records back: the journal can show them whole.
+    /// Returns how many were newly reconstructed.
+    pub fn decode_all(&mut self) -> usize {
+        let new: Vec<usize> = self
+            .records_found
+            .iter()
+            .copied()
+            .filter(|id| !self.decoded.contains(id))
+            .collect();
+        self.decoded.extend(&new);
+        if !new.is_empty() {
+            self.log(
+                "echo",
+                &format!(
+                    "ECHO reconstructed {} damaged record(s). Read them in the journal (J).",
+                    new.len()
+                ),
+            );
+        }
+        new.len()
+    }
+    /// A record as the player can read it right now.
+    pub fn record_text(&self, id: usize) -> String {
+        if self.decoded.contains(&id) {
+            RECORDS[id].to_string()
+        } else {
+            damaged(RECORDS[id])
+        }
     }
     fn finish_turn(&mut self) {
         self.turn += 1;
@@ -1075,6 +1248,20 @@ impl Game {
         {
             return Some("Press E beside an archive (A) to recover its record.");
         }
+        if self.terminal_in_reach() {
+            return Some(
+                "Press E at the terminal (T). One attempt: ask ECHO what your damaged records say first.",
+            );
+        }
+        if self
+            .records_found
+            .iter()
+            .any(|id| !self.decoded.contains(id))
+        {
+            return Some(
+                "That record is damaged. Click the ECHO panel and ask what it says to reconstruct it.",
+            );
+        }
         if self
             .caches
             .iter()
@@ -1170,7 +1357,7 @@ impl Game {
                 serde_json::json!({"target":kind,"position":pos,"steps":steps,"as_of_turn":self.turn})
             })
             .collect();
-        serde_json::json!({"turn":self.turn,"known_routes":routes,"position":self.player,"hp":self.hp,"medkits":self.medkits,"power":self.energy,"loadout":self.loadout.iter().map(|m|m.name()).collect::<Vec<_>>(),"owned_modules":self.owned.iter().map(|m|m.name()).collect::<Vec<_>>(),"module_slots":self.slots(),"floor":{"number":self.floor+1,"of":FLOORS,"name":FLOOR_NAMES[self.floor]},"known_caches":self.caches.iter().filter(|c|!c.taken&&self.discovered(c.pos)).map(|c|c.pos).collect::<Vec<_>>(),"factions":Faction::ALL.iter().map(|f|serde_json::json!({"name":f.name(),"about":f.about(),"standing":self.standing_of(*f)})).collect::<Vec<_>>(),"keys_recovered":self.recovered(),"relay_restored":self.restored,"outcome":self.outcome,"discovered_records":facts,"visible_threats":threats,"known_archives":landmarks,"known_lift":self.lift,"known_relay":if self.discovered(self.relay){Some(self.relay)}else{None},"recent_events":self.events.iter().rev().take(16).collect::<Vec<_>>()})
+        serde_json::json!({"turn":self.turn,"known_routes":routes,"position":self.player,"hp":self.hp,"medkits":self.medkits,"power":self.energy,"loadout":self.loadout.iter().map(|m|m.name()).collect::<Vec<_>>(),"owned_modules":self.owned.iter().map(|m|m.name()).collect::<Vec<_>>(),"module_slots":self.slots(),"floor":{"number":self.floor+1,"of":FLOORS,"name":FLOOR_NAMES[self.floor]},"known_caches":self.caches.iter().filter(|c|!c.taken&&self.discovered(c.pos)).map(|c|c.pos).collect::<Vec<_>>(),"factions":Faction::ALL.iter().map(|f|serde_json::json!({"name":f.name(),"about":f.about(),"standing":self.standing_of(*f)})).collect::<Vec<_>>(),"keys_recovered":self.recovered(),"relay_restored":self.restored,"outcome":self.outcome,"discovered_records":facts,"visible_threats":threats,"known_archives":landmarks,"known_lift":self.lift,"known_relay":if self.discovered(self.relay){Some(self.relay)}else{None},"terminal":self.terminal.as_ref().filter(|t|self.discovered(t.pos)).map(|t|{let c=&CHALLENGES[self.floor];serde_json::json!({"position":t.pos,"state":t.state,"challenge":c.question,"options":c.options,"note":"One attempt. The answer is stated in a record from this floor; if no discovered record states it, say so."})}),"records_player_cannot_read_yet":self.records_found.iter().filter(|id|!self.decoded.contains(id)).count(),"known_supplies":self.pickups.iter().filter(|p|!p.taken&&self.discovered(p.pos)).map(|p|serde_json::json!({"kind":p.kind,"position":p.pos})).collect::<Vec<_>>(),"recent_events":self.events.iter().rev().take(16).collect::<Vec<_>>()})
     }
     /// Bring a save from an older schema up to date (missing fields default).
     pub fn migrate(&mut self) {
@@ -1252,6 +1439,11 @@ impl Game {
             || self.caches.iter().any(|c| !self.floor(c.pos))
             || self.pickups.len() > 8
             || self.pickups.iter().any(|p| !self.floor(p.pos))
+            || self.terminal.as_ref().is_some_and(|t| !self.floor(t.pos))
+            || self
+                .decoded
+                .iter()
+                .any(|id| !self.records_found.contains(id))
             || self.actions.len() > MAX_ACTIONS
             || self.standing.iter().any(|s| s.abs() > 20)
         {
@@ -1582,6 +1774,50 @@ mod tests {
         assert_eq!(g.summary().rank, "Silent Signal");
         g.kills = 10;
         assert_eq!(g.summary().rank, "Custodian's Bane");
+    }
+    #[test]
+    fn damaged_records_hide_every_terminal_answer_until_echo_reads_them() {
+        for c in &CHALLENGES {
+            let shown = damaged(RECORDS[c.record]).to_lowercase();
+            let key = c.options[c.answer].to_lowercase();
+            let longest = key.split(' ').max_by_key(|w| w.len()).unwrap();
+            assert!(!shown.contains(longest), "{shown} gives away {longest}");
+            assert!(RECORDS[c.record].to_lowercase().contains(longest));
+        }
+        let mut g = Game::new(4);
+        g.enemies.clear();
+        g.player = g.archives[1].pos;
+        g.interact();
+        assert!(g.record_text(1).contains('#'));
+        assert_eq!(g.decode_all(), 1);
+        assert_eq!(g.record_text(1), RECORDS[1]);
+        assert_eq!(g.decode_all(), 0);
+        g.validate().unwrap();
+    }
+    #[test]
+    fn a_terminal_takes_one_answer_and_pays_or_punishes() {
+        let mut g = Game::new(4);
+        g.enemies.clear();
+        g.energy = 3;
+        g.player = g.terminal.as_ref().unwrap().pos.offset(1, 0);
+        g.answer(CHALLENGES[0].answer);
+        assert_eq!(
+            (g.energy, g.standing_of(Faction::Custodians)),
+            (MAX_ENERGY, 2)
+        );
+        g.answer(1);
+        assert_eq!(g.standing_of(Faction::Custodians), 2, "one attempt only");
+        let mut w = Game::new(4);
+        w.enemies.clear();
+        w.player = w.terminal.as_ref().unwrap().pos.offset(1, 0);
+        w.answer((CHALLENGES[0].answer + 1) % 3);
+        assert_eq!(
+            (w.energy, w.standing_of(Faction::Custodians)),
+            (START_ENERGY - 2, -1)
+        );
+        // The challenge reaches ECHO, the answer key does not.
+        let k = w.knowledge().to_string();
+        assert!(k.contains("evacuation destination") && !k.contains("\"answer\""));
     }
     #[test]
     fn invalid_loadouts_are_rejected() {
