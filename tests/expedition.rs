@@ -70,7 +70,7 @@ fn difficulty_stays_in_band() {
         if g.outcome == Outcome::Escaped {
             won += 1;
             assert_eq!(g.floor, FLOORS - 1);
-            assert_eq!(g.records_found.len(), 9);
+            assert_eq!(g.records_found.iter().filter(|id| **id < 9).count(), 9);
         } else {
             died_on[g.floor] += 1;
         }
@@ -88,7 +88,8 @@ fn a_full_three_floor_expedition_can_be_won_and_replayed() {
         .find(|g| g.outcome == Outcome::Escaped)
         .expect("some seed among the first forty is a planner win");
     assert_eq!(g.outcome, Outcome::Escaped);
-    assert_eq!((g.floor, g.records_found.len()), (FLOORS - 1, 9));
+    assert_eq!(g.floor, FLOORS - 1);
+    assert!(g.records_found.len() >= 9);
     assert!(g.replay_matches());
     assert!(
         g.turn > 250,

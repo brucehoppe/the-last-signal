@@ -11,8 +11,10 @@ pub const FLOOR_NAMES: [&str; FLOORS] = [
     "The Coolant Levels",
     "The Signal Vault",
 ];
-/// Nine records, three per floor (id / 3 = floor).
-pub const RECORDS: [&str; 9] = [
+/// Records 0-8 are the archive keys, three per floor (id / 3 = floor). Records
+/// 9-11 are optional data fragments, one per floor (`FRAGMENT_BASE + floor`).
+pub const FRAGMENT_BASE: usize = 9;
+pub const RECORDS: [&str; 12] = [
     "Maintenance 04: The relay failed after coolant was diverted to the sealed lower levels.",
     "Evacuation 11: Survivors left through the surface lift. Their destination was North Station.",
     "Operator 19: Restore the relay using all three archive keys, then return to the surface lift.",
@@ -22,6 +24,9 @@ pub const RECORDS: [&str; 9] = [
     "Warden Log 31: North Station has a mast. If the relay signal reaches it, the network wakes and the Custodians stand down.",
     "Custodian Directive 9: Standing down requires an authorised Warden signal. None has been received.",
     "Operator 40: Transmit from the vault lift. Whoever reads this: the Custodians were never enemies, only unfinished.",
+    "Unsent Letter: We promised the Custodians we would return with orders. None of us ever intended to come back.",
+    "Custodian Loop 88412: Relay guarded. No Warden signal received. Operators who restore relays are to be assisted, not harmed.",
+    "Core Manifest: Unit ECHO is the Custodian coordination intelligence. Damaged during the evacuation. Memory partitioned by Warden order.",
 ];
 
 /// A Custodian terminal's challenge. The answer is stated in `record`, which
@@ -237,6 +242,8 @@ pub struct Archive {
 pub enum PickupKind {
     PowerCell,
     Medkit,
+    /// An optional record lying loose: this floor's data fragment.
+    Fragment,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Pickup {
@@ -327,7 +334,7 @@ impl Faction {
     }
 }
 /// Which faction authored each archive record (index = record id).
-pub const RECORD_AUTHORS: [Faction; 9] = [
+pub const RECORD_AUTHORS: [Faction; 12] = [
     Faction::Custodians,
     Faction::Wardens,
     Faction::Wardens,
@@ -337,7 +344,35 @@ pub const RECORD_AUTHORS: [Faction; 9] = [
     Faction::Wardens,
     Faction::Custodians,
     Faction::Wardens,
+    Faction::Wardens,
+    Faction::Custodians,
+    Faction::Custodians,
 ];
+/// What you send from the vault lift. The evidence and the trust you gathered
+/// decide which of these are open to you.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Signal {
+    Distress,
+    StandDown,
+    Testimony,
+}
+impl Signal {
+    pub const ALL: [Signal; 3] = [Signal::Distress, Signal::StandDown, Signal::Testimony];
+    pub fn name(self) -> &'static str {
+        match self {
+            Signal::Distress => "Distress call",
+            Signal::StandDown => "Warden authorisation",
+            Signal::Testimony => "ECHO's testimony",
+        }
+    }
+    pub fn about(self) -> &'static str {
+        match self {
+            Signal::Distress => "Call the Wardens at North Station to come for you and the archives.",
+            Signal::StandDown => "Send the authorised signal Directive 9 asks for. The Custodians stand down everywhere.",
+            Signal::Testimony => "Let ECHO sign the whole record, fragments and all, and send it to both sides.",
+        }
+    }
+}
 /// A player action. The ordered list of these plus the seed and loadout is
 /// enough to replay a whole expedition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,6 +387,7 @@ pub enum Action {
     Fit(Module),
     Unfit(Module),
     Answer(usize),
+    Transmit(Signal),
 }
 #[derive(Clone, Debug)]
 pub struct Summary {
@@ -429,6 +465,11 @@ pub struct Game {
     /// changes what the journal shows, never what an action does.
     #[serde(default)]
     pub decoded: Vec<usize>,
+    /// What was transmitted, once the run is won.
+    #[serde(default)]
+    pub signal: Option<Signal>,
+    #[serde(default)]
+    pub terminals_solved: u32,
 }
 struct Rng(u64);
 impl Rng {
@@ -484,6 +525,8 @@ impl Game {
             pickups: vec![],
             terminal: None,
             decoded: vec![],
+            signal: None,
+            terminals_solved: 0,
         };
         g.build_floor(0);
         g
@@ -615,8 +658,9 @@ impl Game {
             PickupKind::PowerCell,
             PickupKind::PowerCell,
             PickupKind::Medkit,
+            PickupKind::Fragment,
         ] {
-            for _ in 0..8 {
+            for _ in 0..40 {
                 let room = rng.range(0, 6) as usize;
                 let (x, y, w, h) = rooms[room];
                 let pos = Pos {
@@ -775,6 +819,7 @@ impl Game {
             Action::Fit(m) => self.fit(m),
             Action::Unfit(m) => self.unfit(m),
             Action::Answer(i) => self.answer(i),
+            Action::Transmit(s) => self.transmit(s),
         }
     }
     pub fn replay(seed: u64, loadout: &[Module], actions: &[Action]) -> Self {
@@ -803,6 +848,7 @@ impl Game {
             && r.loadout == self.loadout
             && r.records_found == self.records_found
             && r.kills == self.kills
+            && r.signal == self.signal
             && r.standing == self.standing
             && r.recovered() == self.recovered()
             && r.terminal.as_ref().map(|t| t.state) == self.terminal.as_ref().map(|t| t.state)
@@ -891,6 +937,21 @@ impl Game {
             PickupKind::Medkit if self.medkits < MAX_MEDKITS => {
                 self.medkits += 1;
                 self.log("pickup", "Picked up a medkit.");
+            }
+            PickupKind::Fragment => {
+                let id = FRAGMENT_BASE + self.floor;
+                if !self.records_found.contains(&id) {
+                    self.records_found.push(id);
+                }
+                self.log(
+                    "archive",
+                    &format!("Data fragment, damaged. {}", damaged(RECORDS[id])),
+                );
+                self.log(
+                    "echo",
+                    "ECHO: That was not in any archive index. Ask me what it says.",
+                );
+                self.shift_standing(RECORD_AUTHORS[id], 1);
             }
             _ => {
                 self.log("status", "You cannot carry more of that. It stays here.");
@@ -1173,11 +1234,7 @@ impl Game {
                 if self.floor + 1 < FLOORS {
                     self.descend();
                 } else {
-                    self.outcome = Outcome::Escaped;
-                    self.log(
-                        "escape",
-                        "Signal transmitted. You escaped with the recovered evidence.",
-                    );
+                    self.send(Signal::Distress);
                 }
             } else {
                 self.log("status", "Restore the relay before departure.");
@@ -1188,6 +1245,77 @@ impl Game {
             "status",
             "Nothing to interact with here. Stand beside an archive, cache, relay, or lift.",
         );
+    }
+    /// True when E at the lift would end the run: time to choose a signal.
+    pub fn ready_to_transmit(&self) -> bool {
+        self.outcome == Outcome::Exploring
+            && self.restored
+            && self.floor + 1 == FLOORS
+            && self.player.distance(self.lift) <= 1
+    }
+    /// Why a signal cannot be sent, or `Ok` if it can.
+    pub fn signal_open(&self, s: Signal) -> Result<(), &'static str> {
+        match s {
+            Signal::Distress => Ok(()),
+            Signal::StandDown if self.standing_of(Faction::Custodians) >= 0 => Ok(()),
+            Signal::StandDown => {
+                Err("The Custodians will not accept it from you: standing below 0.")
+            }
+            Signal::Testimony
+                if (0..FLOORS).all(|f| self.records_found.contains(&(FRAGMENT_BASE + f))) =>
+            {
+                Ok(())
+            }
+            Signal::Testimony => Err("Needs the data fragment (f) from every floor."),
+        }
+    }
+    /// Choose what the vault lift transmits. Plain `interact` sends a distress call.
+    pub fn transmit(&mut self, s: Signal) {
+        if !self.ready_to_transmit() || self.signal_open(s).is_err() {
+            return;
+        }
+        self.record(Action::Transmit(s));
+        self.send(s);
+    }
+    fn send(&mut self, s: Signal) {
+        self.signal = Some(s);
+        self.outcome = Outcome::Escaped;
+        self.log(
+            "escape",
+            &format!(
+                "{} transmitted. You escaped with the recovered evidence.",
+                s.name()
+            ),
+        );
+        match s {
+            Signal::Distress => {}
+            Signal::StandDown => self.shift_standing(Faction::Custodians, 3),
+            Signal::Testimony => {
+                self.shift_standing(Faction::Wardens, 3);
+                self.shift_standing(Faction::Custodians, 3);
+            }
+        }
+    }
+    /// One number for the run, for comparing attempts at the same seed.
+    pub fn score(&self) -> i32 {
+        let base = self.records_found.len() as i32 * 50
+            + self.terminals_solved as i32 * 100
+            + self.standing.iter().sum::<i32>() * 10
+            + self.floor as i32 * 150;
+        match self.outcome {
+            Outcome::Escaped => {
+                base + 1000
+                    + self.hp * 5
+                    + match self.signal {
+                        Some(Signal::Testimony) => 400,
+                        Some(Signal::StandDown) => 200,
+                        _ => 0,
+                    }
+                    + if self.kills == 0 { 300 } else { 0 }
+                    - (self.turn / 4) as i32
+            }
+            _ => base,
+        }
     }
     /// True when a terminal that still accepts an answer is within reach.
     pub fn terminal_in_reach(&self) -> bool {
@@ -1211,6 +1339,7 @@ impl Game {
             };
         }
         if right {
+            self.terminals_solved += 1;
             self.energy = MAX_ENERGY;
             self.log(
                 "terminal",
@@ -1548,7 +1677,7 @@ impl Game {
             return Some(if self.floor + 1 < FLOORS {
                 "Relay online. Return to the lift (L) and press E to descend."
             } else {
-                "Relay online. Return to the lift (L) and press E to transmit."
+                "Relay online. Return to the lift (L) and press E to choose what to transmit."
             });
         }
         if self.recovered() == 0 && self.turn < 25 {
@@ -1562,12 +1691,19 @@ impl Game {
         let rank = match self.outcome {
             Outcome::Dead => "Lost Signal",
             Outcome::Exploring => "Expedition in progress",
+            Outcome::Escaped if self.signal == Some(Signal::Testimony) => "The Last Signal",
             Outcome::Escaped if self.kills == 0 => "Silent Signal",
             Outcome::Escaped if self.kills >= 10 => "Custodian's Bane",
             Outcome::Escaped if wardens >= 6 => "Warden's Friend",
             Outcome::Escaped => "Signal Bearer",
         };
         let epilogue = match self.outcome {
+            Outcome::Escaped if self.signal == Some(Signal::Testimony) => {
+                "ECHO signs the transmission with its own name. Wardens and Custodians hear the whole truth at once, and the complex wakes up whole."
+            }
+            Outcome::Escaped if self.signal == Some(Signal::StandDown) => {
+                "The Custodians accept your authorisation and stand down across the network. The archives are open to whoever comes next."
+            }
             Outcome::Escaped if custodians >= 1 => {
                 "The Custodians let the signal pass and stand down."
             }
@@ -1578,7 +1714,12 @@ impl Game {
         Summary {
             rank,
             lines: vec![
-                format!("Turns {}   Foes disabled {}", self.turn, self.kills),
+                format!(
+                    "Score {}   Turns {}   Foes disabled {}",
+                    self.score(),
+                    self.turn,
+                    self.kills
+                ),
                 format!(
                     "Floor {}/{}   Records {}/{}   Power left {}",
                     self.floor + 1,
@@ -1625,7 +1766,7 @@ impl Game {
                 serde_json::json!({"target":kind,"position":pos,"steps":steps,"as_of_turn":self.turn})
             })
             .collect();
-        serde_json::json!({"turn":self.turn,"known_routes":routes,"position":self.player,"hp":self.hp,"medkits":self.medkits,"power":self.energy,"loadout":self.loadout.iter().map(|m|m.name()).collect::<Vec<_>>(),"owned_modules":self.owned.iter().map(|m|m.name()).collect::<Vec<_>>(),"module_slots":self.slots(),"floor":{"number":self.floor+1,"of":FLOORS,"name":FLOOR_NAMES[self.floor]},"known_caches":self.caches.iter().filter(|c|!c.taken&&self.discovered(c.pos)).map(|c|c.pos).collect::<Vec<_>>(),"factions":Faction::ALL.iter().map(|f|serde_json::json!({"name":f.name(),"about":f.about(),"standing":self.standing_of(*f)})).collect::<Vec<_>>(),"keys_recovered":self.recovered(),"relay_restored":self.restored,"outcome":self.outcome,"discovered_records":facts,"visible_threats":threats,"known_archives":landmarks,"known_lift":self.lift,"known_relay":if self.discovered(self.relay){Some(self.relay)}else{None},"terminal":self.terminal.as_ref().filter(|t|self.discovered(t.pos)).map(|t|{let c=&CHALLENGES[self.floor];serde_json::json!({"position":t.pos,"state":t.state,"challenge":c.question,"options":c.options,"note":"One attempt. The answer is stated in a record from this floor; if no discovered record states it, say so."})}),"records_player_cannot_read_yet":self.records_found.iter().filter(|id|!self.decoded.contains(id)).count(),"known_supplies":self.pickups.iter().filter(|p|!p.taken&&self.discovered(p.pos)).map(|p|serde_json::json!({"kind":p.kind,"position":p.pos})).collect::<Vec<_>>(),"recent_events":self.events.iter().rev().take(16).collect::<Vec<_>>()})
+        serde_json::json!({"turn":self.turn,"known_routes":routes,"position":self.player,"hp":self.hp,"medkits":self.medkits,"power":self.energy,"loadout":self.loadout.iter().map(|m|m.name()).collect::<Vec<_>>(),"owned_modules":self.owned.iter().map(|m|m.name()).collect::<Vec<_>>(),"module_slots":self.slots(),"floor":{"number":self.floor+1,"of":FLOORS,"name":FLOOR_NAMES[self.floor]},"known_caches":self.caches.iter().filter(|c|!c.taken&&self.discovered(c.pos)).map(|c|c.pos).collect::<Vec<_>>(),"factions":Faction::ALL.iter().map(|f|serde_json::json!({"name":f.name(),"about":f.about(),"standing":self.standing_of(*f)})).collect::<Vec<_>>(),"keys_recovered":self.recovered(),"relay_restored":self.restored,"outcome":self.outcome,"discovered_records":facts,"visible_threats":threats,"known_archives":landmarks,"known_lift":self.lift,"known_relay":if self.discovered(self.relay){Some(self.relay)}else{None},"terminal":self.terminal.as_ref().filter(|t|self.discovered(t.pos)).map(|t|{let c=&CHALLENGES[self.floor];serde_json::json!({"position":t.pos,"state":t.state,"challenge":c.question,"options":c.options,"note":"One attempt. The answer is stated in a record from this floor; if no discovered record states it, say so."})}),"records_player_cannot_read_yet":self.records_found.iter().filter(|id|!self.decoded.contains(id)).count(),"known_supplies":self.pickups.iter().filter(|p|!p.taken&&self.discovered(p.pos)).map(|p|serde_json::json!({"kind":p.kind,"position":p.pos})).collect::<Vec<_>>(),"data_fragments_found":self.records_found.iter().filter(|id|**id>=FRAGMENT_BASE).count(),"transmission_options":if self.floor+1==FLOORS&&self.restored{Some(Signal::ALL.iter().map(|s|serde_json::json!({"signal":s.name(),"effect":s.about(),"open":self.signal_open(*s).is_ok(),"blocked_because":self.signal_open(*s).err()})).collect::<Vec<_>>())}else{None},"score":self.score(),"recent_events":self.events.iter().rev().take(16).collect::<Vec<_>>()})
     }
     /// Bring a save from an older schema up to date (missing fields default).
     pub fn migrate(&mut self) {
@@ -1725,6 +1866,7 @@ impl Game {
         }
         if (self.outcome == Outcome::Dead) != (self.hp == 0)
             || self.outcome == Outcome::Escaped && !self.restored
+            || (self.outcome == Outcome::Escaped) != self.signal.is_some() && self.signal.is_some()
         {
             return Err("Inconsistent outcome".into());
         }
@@ -2160,6 +2302,53 @@ mod tests {
         assert_eq!(hunter.kind, EnemyKind::Hunter);
         assert!(hunter.pos.distance(g.lift) <= 3, "deployed at the lift");
         assert!(g.enemies.iter().all(|e| e.awareness == Awareness::Alert));
+        g.validate().unwrap();
+    }
+    #[test]
+    fn fragments_are_optional_records_that_open_the_last_ending() {
+        let mut g = Game::new(6);
+        g.enemies.clear();
+        let at = g
+            .pickups
+            .iter()
+            .find(|p| p.kind == PickupKind::Fragment)
+            .expect("every floor has a fragment")
+            .pos;
+        g.player = at.offset(if g.floor(at.offset(1, 0)) { 1 } else { -1 }, 0);
+        let (dx, dy) = (at.x - g.player.x, at.y - g.player.y);
+        g.step(dx, dy);
+        assert_eq!(g.records_found, vec![FRAGMENT_BASE]);
+        assert_eq!(g.recovered(), 0, "a fragment is not a relay key");
+        assert!(g.signal_open(Signal::Testimony).is_err());
+        g.records_found
+            .extend([FRAGMENT_BASE + 1, FRAGMENT_BASE + 2]);
+        assert!(g.signal_open(Signal::Testimony).is_ok());
+        g.validate().unwrap();
+    }
+    #[test]
+    fn the_vault_lift_sends_the_signal_you_choose() {
+        let mut g = Game::new(3);
+        g.floor = FLOORS - 1;
+        g.build_floor(FLOORS - 1);
+        g.enemies.clear();
+        for a in &mut g.archives {
+            a.recovered = true;
+        }
+        g.player = g.relay;
+        g.interact();
+        g.player = g.lift;
+        g.standing[1] = -3;
+        g.transmit(Signal::StandDown);
+        assert_eq!(g.outcome, Outcome::Exploring, "distrusted: refused");
+        g.standing[1] = 0;
+        let before = g.score();
+        g.transmit(Signal::StandDown);
+        assert_eq!(
+            (g.outcome, g.signal),
+            (Outcome::Escaped, Some(Signal::StandDown))
+        );
+        assert!(g.score() > before + 1000);
+        assert!(g.summary().lines[3].contains("stand down"));
         g.validate().unwrap();
     }
     #[test]

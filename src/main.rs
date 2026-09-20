@@ -6,9 +6,9 @@ use std::{
 use the_last_signal::{
     ai,
     core::{
-        Awareness, EnemyKind, Faction, Game, Module, Outcome, PickupKind, Pos, TerminalState, Tile,
-        ANALYZE_COST, CHALLENGES, FLOORS, FLOOR_NAMES, HEIGHT, PULSE_COST, RECORD_AUTHORS,
-        SCAN_COST, WIDTH,
+        Awareness, EnemyKind, Faction, Game, Module, Outcome, PickupKind, Pos, Signal,
+        TerminalState, Tile, ANALYZE_COST, CHALLENGES, FLOORS, FLOOR_NAMES, FRAGMENT_BASE, HEIGHT,
+        PULSE_COST, RECORD_AUTHORS, SCAN_COST, WIDTH,
     },
     save,
 };
@@ -337,6 +337,7 @@ fn draw_map(g: &Game, route: &[Pos]) {
         let (glyph, color) = match p.kind {
             PickupKind::PowerCell => ("*", AMBER),
             PickupKind::Medkit => ("+", Color::new(0.55, 0.9, 0.5, 1.)),
+            PickupKind::Fragment => ("f", LIGHT),
         };
         text(
             glyph,
@@ -394,6 +395,7 @@ enum Screen {
     Console,
     NewConfirm,
     Terminal,
+    Transmit,
 }
 struct Pending {
     rx: Receiver<Result<String, String>>,
@@ -594,10 +596,10 @@ async fn main() {
         draw_map(&g, &overlay_path);
         map_sum += get_time() - map_t;
         text(
-            "ARCHIVE A  RELAY R  LIFT L  CACHE C  TERMINAL T  POWER *  MEDKIT +  FOE S H O",
+            "ARCHIVE A  RELAY R  LIFT L  CACHE C  TERMINAL T  FRAGMENT f  POWER *  MEDKIT +  FOE S H O",
             28.,
             672.,
-            17.,
+            15.,
             MUTED,
         );
         for (i, e) in g.events.iter().rev().take(4).enumerate() {
@@ -773,7 +775,11 @@ async fn main() {
                     if g.terminal_in_reach() {
                         screen = Screen::Terminal;
                     }
-                    g.interact();
+                    if g.ready_to_transmit() {
+                        screen = Screen::Transmit;
+                    } else {
+                        g.interact();
+                    }
                 } else if is_key_pressed(KeyCode::H) {
                     g.heal();
                 } else if is_key_pressed(KeyCode::F) {
@@ -1262,7 +1268,51 @@ async fn main() {
                         status =
                             "New expedition started. Your existing disk save is unchanged.".into();
                     }
+                    if button("DAILY SIGNAL", Rect::new(217., 470., 230., 42.), true) {
+                        // Same complex for everyone today: compare scores.
+                        let day = (macroquad::miniquad::date::now() / 86_400.) as u64;
+                        g = Game::new_with(20_000_000 + day, &loadout);
+                        screen = Screen::Game;
+                        prompt.clear();
+                        scroll = 0;
+                        status =
+                            "Daily signal: everyone gets this same complex today. Compare scores."
+                                .into();
+                    }
+                    wrapped("Daily signal: one shared seed per day, the same complex for everyone. Your score is shown when the run ends.", 469., 488., 70, 16., MUTED, 2);
                     if button("CANCEL / ESC", Rect::new(469., 410., 230., 42.), true)
+                        || is_key_pressed(KeyCode::Escape)
+                    {
+                        screen = Screen::Game;
+                    }
+                }
+                Screen::Transmit => {
+                    text("THE VAULT LIFT", 217., 185., 34., LIGHT);
+                    text("CHOOSE THE LAST SIGNAL", 217., 216., 17., TEAL);
+                    wrapped("The relay will carry one transmission. What you found and how you treated the Custodians decide what you can send. Ask ECHO if you are unsure: it knows these options.", 217., 250., 92, 17., MUTED, 3);
+                    let mut pick = None;
+                    for (i, sig) in Signal::ALL.iter().enumerate() {
+                        let y = 330. + i as f32 * 88.;
+                        let open = g.signal_open(*sig);
+                        if button(
+                            &format!("{}  {}", i + 1, sig.name()),
+                            Rect::new(217., y, 330., 40.),
+                            open.is_ok(),
+                        ) || (open.is_ok()
+                            && is_key_pressed([KeyCode::Key1, KeyCode::Key2, KeyCode::Key3][i]))
+                        {
+                            pick = Some(*sig);
+                        }
+                        wrapped(sig.about(), 565., y + 16., 60, 15., LIGHT, 2);
+                        if let Err(why) = open {
+                            wrapped(why, 565., y + 54., 60, 15., CORAL, 1);
+                        }
+                    }
+                    if let Some(sig) = pick {
+                        g.transmit(sig);
+                        screen = Screen::Game;
+                    }
+                    if button("NOT YET / ESC", Rect::new(217., 610., 220., 40.), true)
                         || is_key_pressed(KeyCode::Escape)
                     {
                         screen = Screen::Game;
@@ -1329,19 +1379,30 @@ async fn main() {
                         16.,
                         AMBER,
                     );
-                    for n in 0..3 {
-                        let id = journal_floor * 3 + n;
-                        let y = 285. + n as f32 * 72.;
+                    for n in 0..4 {
+                        let id = if n < 3 {
+                            journal_floor * 3 + n
+                        } else {
+                            FRAGMENT_BASE + journal_floor
+                        };
+                        let y = 280. + n as f32 * 60.;
                         text(
-                            &format!("ARCHIVE {:02}  /  {}", id + 1, RECORD_AUTHORS[id].name()),
+                            &if n < 3 {
+                                format!("ARCHIVE {:02}  /  {}", id + 1, RECORD_AUTHORS[id].name())
+                            } else {
+                                format!(
+                                    "DATA FRAGMENT (optional)  /  {}",
+                                    RECORD_AUTHORS[id].name()
+                                )
+                            },
                             217.,
                             y,
-                            18.,
+                            16.,
                             AMBER,
                         );
                         let recovered = g.records_found.contains(&id);
                         if recovered && !g.decoded.contains(&id) {
-                            text("DAMAGED: ASK ECHO WHAT IT SAYS", 560., y, 15., CORAL);
+                            text("DAMAGED: ASK ECHO WHAT IT SAYS", 640., y, 15., CORAL);
                         }
                         wrapped(
                             &if recovered {
@@ -1350,16 +1411,16 @@ async fn main() {
                                 "Not recovered. Contents unknown.".to_string()
                             },
                             217.,
-                            y + 28.,
-                            84,
-                            18.,
+                            y + 20.,
+                            100,
+                            16.,
                             if recovered { LIGHT } else { MUTED },
                             2,
                         );
                     }
-                    text("FACTIONS", 217., 514., 18., AMBER);
+                    text("FACTIONS", 217., 530., 16., AMBER);
                     for (i, f) in Faction::ALL.iter().enumerate() {
-                        let y = 540. + i as f32 * 40.;
+                        let y = 553. + i as f32 * 38.;
                         let st = g.standing_of(*f);
                         text(
                             &format!("{}  {:+}", f.name().to_uppercase(), st),

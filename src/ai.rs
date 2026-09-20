@@ -79,6 +79,12 @@ pub fn payload(game: &Game, question: &str, config: &Config) -> serde_json::Valu
         messages
             .push(json!({"role":c.role,"content":c.content.chars().take(600).collect::<String>()}));
     }
+    if game
+        .records_found
+        .contains(&(crate::core::FRAGMENT_BASE + 2))
+    {
+        messages.push(json!({"role":"system","content":"The recovered Core Manifest has just told you what you are: the Custodians' own coordination intelligence, damaged in the evacuation, your memory partitioned by Warden order. You did not know. Let that colour how you speak about the Custodians and the Wardens, without inventing facts."}));
+    }
     messages.push(json!({"role":"user","content":question}));
     json!({"model":config.model,"messages":messages,"stream":false,"think":false,"keep_alive":"5m","format":{"type":"object","properties":{"reply":{"type":"string"}},"required":["reply"],"additionalProperties":false},"options":{"temperature":0.4,"num_predict":220,"num_ctx":4096}})
 }
@@ -189,6 +195,36 @@ pub fn demo_reply(game: &Game, question: &str) -> String {
                 "The terminal asks: {} No record we hold answers that, and it allows one attempt. Recover more archives on this floor first.",
                 c.question
             )
+        };
+    }
+    if has(&["transmit", "signal", "ending", "send", "choose"]) {
+        return match k["transmission_options"].as_array() {
+            None => "The signal goes out from the vault lift on the last floor, once its relay is restored. What we can send depends on Custodian standing and on the data fragments (f) we find.".into(),
+            Some(options) => options
+                .iter()
+                .map(|o| {
+                    format!(
+                        "{}: {}",
+                        o["signal"].as_str().unwrap_or("?"),
+                        if o["open"] == true {
+                            "open."
+                        } else {
+                            o["blocked_because"].as_str().unwrap_or("closed.")
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        };
+    }
+    if has(&["who are you", "what are you", "yourself", "echo"]) {
+        return if game
+            .records_found
+            .contains(&(crate::core::FRAGMENT_BASE + 2))
+        {
+            "The Core Manifest says I am the Custodians' coordination intelligence, partitioned by Warden order. I did not know. It explains why their directives feel familiar.".into()
+        } else {
+            "I am ECHO, your expedition companion. Parts of my memory are missing. I do not know why.".into()
         };
     }
     if has(&["north station"]) {
