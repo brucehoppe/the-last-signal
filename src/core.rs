@@ -175,6 +175,14 @@ pub const SENTINEL_LEASH: i32 = 12;
 pub const SIGNAL_RANGE: i32 = 8;
 /// A strike on a foe that is not alert to you (or is stunned) does this instead of 3.
 pub const AMBUSH_DAMAGE: i32 = 6;
+/// Guards remember this many places where you ambushed a unit, per floor.
+pub const MAX_AMBUSH_SPOTS: usize = 3;
+/// A searching guard only walks to a remembered corner this many steps away.
+const SEARCH_RANGE: u16 = 18;
+/// The longest way round a flanking guard will take to get behind you.
+const FLANK_RANGE: u16 = 40;
+/// How many sentinels the Overseer can call to the relay per floor.
+pub const MAX_REINFORCEMENTS: u32 = 2;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Enemy {
     pub pos: Pos,
@@ -197,6 +205,13 @@ pub struct Enemy {
     /// Stood down by the Custodians: it ignores you unless you strike it.
     #[serde(default)]
     pub passive: bool,
+    /// A badly hurt sentinel falling back towards an ally.
+    #[serde(default)]
+    pub retreating: bool,
+    /// The tile near you it is working round to, to cut off your way out. It
+    /// keeps going while you are out of sight.
+    #[serde(default)]
+    pub flank: Option<Pos>,
 }
 impl Enemy {
     pub fn new(pos: Pos, kind: EnemyKind, hp: i32) -> Self {
@@ -210,6 +225,8 @@ impl Enemy {
             patience: 0,
             stun: 0,
             passive: false,
+            retreating: false,
+            flank: None,
         }
     }
 }
@@ -486,6 +503,17 @@ pub struct Game {
     pub signal: Option<Signal>,
     #[serde(default)]
     pub terminals_solved: u32,
+    /// Where you stood when you last ambushed a unit on this floor; searching
+    /// guards check these corners.
+    #[serde(default)]
+    pub ambush_spots: Vec<Pos>,
+    /// Sentinels the Overseer has called to the relay on this floor.
+    #[serde(default)]
+    pub reinforcements: u32,
+    /// Turns off the guards' seeded unpredictability, so tests can pin exact
+    /// behaviour. Never set in play.
+    #[serde(default)]
+    pub predictable: bool,
 }
 struct Rng(u64);
 impl Rng {
@@ -543,6 +571,9 @@ impl Game {
             decoded: vec![],
             signal: None,
             terminals_solved: 0,
+            ambush_spots: vec![],
+            reinforcements: 0,
+            predictable: false,
         };
         g.build_floor(0);
         g
@@ -562,6 +593,8 @@ impl Game {
         self.caches.clear();
         self.restored = false;
         self.pickups.clear();
+        self.ambush_spots.clear();
+        self.reinforcements = 0;
         let mut centers = vec![];
         let mut rooms = vec![];
         for row in 0..2 {
@@ -913,6 +946,9 @@ impl Game {
             e.awareness = Awareness::Alert;
             e.last_seen = Some(self.player);
             let (name, dead) = (e.kind.name(), e.hp <= 0);
+            if ambush {
+                self.remember_ambush(self.player);
+            }
             self.log(
                 "combat",
                 &if ambush {
@@ -1407,6 +1443,10 @@ impl Game {
     }
     /// Steps from `target` to every floor tile (`u16::MAX` where unreachable).
     fn distances_from(&self, target: Pos) -> Vec<u16> {
+        self.distances_avoiding(target, &[])
+    }
+    /// Like `distances_from`, but the tiles in `blocked` cannot be walked through.
+    fn distances_avoiding(&self, target: Pos, blocked: &[Pos]) -> Vec<u16> {
         let mut dist = vec![u16::MAX; (WIDTH * HEIGHT) as usize];
         let Some(t) = Self::index(target) else {
             return dist;
@@ -1417,7 +1457,7 @@ impl Game {
             let d = dist[Self::index(p).unwrap()];
             for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
                 let n = p.offset(dx, dy);
-                if self.floor(n) {
+                if self.floor(n) && !blocked.contains(&n) {
                     let i = Self::index(n).unwrap();
                     if dist[i] == u16::MAX {
                         dist[i] = d + 1;
@@ -1432,6 +1472,11 @@ impl Game {
     /// and all, if a free tile gets it closer.
     fn advance(&mut self, i: usize, target: Pos) {
         let dist = self.distances_from(target);
+        self.advance_by(i, &dist, None);
+    }
+    /// Move foe `i` one tile down a distance map, if a free tile gets it closer.
+    /// Ties go to the tile farthest from `avoid`, so a foe can slip past you.
+    fn advance_by(&mut self, i: usize, dist: &[u16], avoid: Option<Pos>) {
         let p = self.enemies[i].pos;
         let here = dist[Self::index(p).unwrap()];
         let leash = (self.enemies[i].kind == EnemyKind::Sentinel)
@@ -1446,10 +1491,267 @@ impl Game {
                     && !self.enemies.iter().any(|e| e.pos == *q)
                     && leash.is_none_or(|h| q.distance(h) <= SENTINEL_LEASH)
             })
-            .min_by_key(|q| dist[Self::index(*q).unwrap()]);
+            .min_by_key(|q| {
+                (
+                    dist[Self::index(*q).unwrap()],
+                    avoid.map_or(0, |a| -q.distance(a)),
+                )
+            });
         if let Some(q) = best.filter(|q| dist[Self::index(*q).unwrap()] < here) {
             self.enemies[i].pos = q;
         }
+    }
+    /// The nearest other unit a wounded foe `i` can fall back to, if it is not
+    /// already standing beside one.
+    fn ally_to_fall_back_on(&self, i: usize) -> Option<Pos> {
+        let p = self.enemies[i].pos;
+        let mut allies = self
+            .enemies
+            .iter()
+            .enumerate()
+            .filter(|(j, e)| *j != i && !e.passive && e.stun == 0)
+            .map(|(_, e)| e.pos)
+            .peekable();
+        allies.peek()?;
+        let nearest = allies.min_by_key(|a| a.distance(p))?;
+        (nearest.distance(p) > 1).then_some(nearest)
+    }
+    /// A number in `0..n` that looks random but is fixed by the seed, floor, guard
+    /// and `salt`, so a run still replays exactly while the guards stay hard to
+    /// second-guess. 0 is always the plain, textbook behaviour, and it is all
+    /// `predictable` ever returns.
+    fn roll(&self, i: usize, salt: u64, n: u32) -> u32 {
+        if self.predictable || n <= 1 {
+            return 0;
+        }
+        let mut z = self.seed
+            ^ (self.floor as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (i as u64 + 1).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+            ^ salt.wrapping_mul(0x1656_67B1_9E37_79F9);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) % u64::from(n)) as u32
+    }
+    /// Remember where you stood when you ambushed a unit: the guards will look
+    /// there next time they lose you.
+    fn remember_ambush(&mut self, at: Pos) {
+        self.ambush_spots.retain(|s| *s != at);
+        self.ambush_spots.push(at);
+        if self.ambush_spots.len() > MAX_AMBUSH_SPOTS {
+            self.ambush_spots.remove(0);
+        }
+    }
+    /// Where searching foe `i` goes first, and for how many turns: the nearest
+    /// remembered ambush corner it can reach (a sentinel only within its leash).
+    fn search_plan(&self, i: usize) -> Option<(Pos, u32)> {
+        let e = &self.enemies[i];
+        // A guard does not always recall the corner.
+        if self.roll(i, 5 + u64::from(self.turn), 4) == 3 {
+            return None;
+        }
+        let dist = self.distances_from(e.pos);
+        let steps = |t: Pos| dist[Self::index(t).unwrap()];
+        let leash = (e.kind == EnemyKind::Sentinel).then_some(e.home).flatten();
+        let spot = self
+            .ambush_spots
+            .iter()
+            .copied()
+            .filter(|s| *s != e.pos && steps(*s) <= SEARCH_RANGE)
+            .filter(|s| leash.is_none_or(|h| s.distance(h) <= SENTINEL_LEASH))
+            .min_by_key(|s| steps(*s))?;
+        let slow = if e.kind == EnemyKind::Overseer { 2 } else { 1 };
+        Some((spot, u32::from(steps(spot)) * slow + 3))
+    }
+    /// A room-sized hop for a hunter that has lost you: a floor tile five to
+    /// nine steps away, chosen from the turn and the hunter's place in the list
+    /// so that replays agree.
+    fn sweep_waypoint(&self, i: usize) -> Option<Pos> {
+        let dist = self.distances_from(self.enemies[i].pos);
+        let near: Vec<Pos> = (0..WIDTH * HEIGHT)
+            .filter(|n| (5..=9).contains(&dist[*n as usize]))
+            .map(|n| Pos {
+                x: n % WIDTH,
+                y: n / WIDTH,
+            })
+            .collect();
+        let jitter = self.roll(i, 7 + u64::from(self.turn), 997) as usize;
+        (!near.is_empty()).then(|| near[(self.turn as usize * 31 + i * 17 + jitter) % near.len()])
+    }
+    /// A tile with walls on both sides: a corridor or a doorway.
+    fn is_choke(&self, p: Pos) -> bool {
+        let open = |dx, dy| self.floor(p.offset(dx, dy));
+        self.floor(p)
+            && ((open(-1, 0) && open(1, 0) && !open(0, -1) && !open(0, 1))
+                || (open(0, -1) && open(0, 1) && !open(-1, 0) && !open(1, 0)))
+    }
+    /// A sentinel that sees you but is not yet in reach holds a corridor tile
+    /// on your way to its post rather than charging into the open. `Some(tile)`
+    /// is the tile to hold, which may be where it already stands.
+    fn choke_goal(&self, i: usize) -> Option<Pos> {
+        let e = &self.enemies[i];
+        let home = e.home?;
+        // Roughly three times in four it holds; the odd one charges out instead.
+        let holds = self.roll(i, 2 + u64::from(self.turn / 6), 4) < 3;
+        if e.kind != EnemyKind::Sentinel || e.pos.distance(self.player) < 3 || !holds {
+            return None;
+        }
+        let (from_you, from_post, from_me) = (
+            self.distances_from(self.player),
+            self.distances_from(home),
+            self.distances_from(e.pos),
+        );
+        let at = |d: &[u16], t: Pos| d[Self::index(t).unwrap()];
+        let on_route = at(&from_you, home);
+        (0..WIDTH * HEIGHT)
+            .map(|n| Pos {
+                x: n % WIDTH,
+                y: n / WIDTH,
+            })
+            .filter(|t| self.is_choke(*t) && *t != self.player)
+            .filter(|t| at(&from_me, *t) <= 4 && t.distance(home) <= SENTINEL_LEASH)
+            .filter(|t| at(&from_you, *t) >= 2)
+            .filter(|t| {
+                u32::from(at(&from_you, *t)) + u32::from(at(&from_post, *t))
+                    <= u32::from(on_route) + 1
+            })
+            .filter(|t| {
+                !self
+                    .enemies
+                    .iter()
+                    .enumerate()
+                    .any(|(j, o)| j != i && o.pos == *t)
+            })
+            .min_by_key(|t| at(&from_me, *t))
+    }
+    /// When another alert unit is already closing on you, foe `i` heads for the
+    /// tile near you that it can reach well before that unit can: your way out.
+    /// Returns the distances to walk down (round you and the lead unit, not
+    /// through them), or `None` when nobody leads it or it cannot get round.
+    fn flank_route(&self, i: usize) -> Option<(Pos, Vec<u16>)> {
+        let me = &self.enemies[i];
+        // Not every guard thinks to work round you, and not every turn.
+        if self.roll(i, 100 + u64::from(self.turn / 3), 4) == 3 {
+            return None;
+        }
+        let from_you = self.distances_from(self.player);
+        let at = |d: &[u16], t: Pos| d[Self::index(t).unwrap()];
+        let mine = at(&from_you, me.pos);
+        if mine <= 2 || mine == u16::MAX {
+            return None;
+        }
+        let lead = self
+            .enemies
+            .iter()
+            .enumerate()
+            .filter(|(j, e)| {
+                *j != i
+                    && !e.passive
+                    && e.stun == 0
+                    && !e.retreating
+                    && e.awareness == Awareness::Alert
+                    && e.last_seen.is_some()
+            })
+            .filter(|(j, e)| {
+                let d = at(&from_you, e.pos);
+                d < mine || (d == mine && *j < i)
+            })
+            .min_by_key(|(_, e)| at(&from_you, e.pos))?
+            .1
+            .pos;
+        let from_lead = self.distances_avoiding(lead, &[self.player]);
+        let from_me = self.distances_avoiding(me.pos, &[self.player, lead]);
+        let leash = (me.kind == EnemyKind::Sentinel)
+            .then_some(me.home)
+            .flatten();
+        let (score, _, tile) = (0..WIDTH * HEIGHT)
+            .map(|n| Pos {
+                x: n % WIDTH,
+                y: n / WIDTH,
+            })
+            .filter(|t| (2..=5).contains(&at(&from_you, *t)))
+            .filter(|t| at(&from_lead, *t) != u16::MAX && at(&from_me, *t) <= FLANK_RANGE)
+            .filter(|t| leash.is_none_or(|h| t.distance(h) <= SENTINEL_LEASH))
+            .map(|t| {
+                let gap = i32::from(at(&from_lead, t)) - i32::from(at(&from_me, t));
+                (gap, -i32::from(at(&from_me, t)), t)
+            })
+            .max_by_key(|(gap, near, t)| (*gap, *near, -(t.y * WIDTH + t.x)))?;
+        // Already in position: nothing left to work round, so it closes in.
+        (score >= 2 && tile != me.pos)
+            .then(|| (tile, self.distances_avoiding(tile, &[self.player, lead])))
+    }
+    /// Carry on round to the tile foe `i` chose while it could see you. Gives
+    /// up (returning false) once it arrives or cannot make progress.
+    fn keep_flanking(&mut self, i: usize) -> bool {
+        let Some(tile) = self.enemies[i].flank else {
+            return false;
+        };
+        let (p, kind) = (self.enemies[i].pos, self.enemies[i].kind);
+        if p == tile {
+            self.enemies[i].flank = None;
+            return false;
+        }
+        let mut blocked: Vec<Pos> = self
+            .enemies
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, e)| e.pos)
+            .collect();
+        blocked.extend(self.enemies[i].last_seen);
+        let route = self.distances_avoiding(tile, &blocked);
+        if kind.advances(self.turn) {
+            self.advance_by(i, &route, None);
+            if self.enemies[i].pos == p {
+                self.enemies[i].flank = None;
+                return false;
+            }
+        }
+        true
+    }
+    /// The Overseer calls a sentinel to the relay when it first turns on you,
+    /// and again when it is badly hurt.
+    fn overseer_calls(&mut self, i: usize) {
+        let hurt = self.enemies[i].hp * 2 <= EnemyKind::Overseer.max_hp(self.floor);
+        let due = match self.reinforcements {
+            0 => true,
+            1 => hurt,
+            _ => false,
+        };
+        // It takes a moment to raise the call: a turn late, now and then.
+        let slow = self.roll(i, 8 + u64::from(self.turn), 3) == 2;
+        if !due || slow || self.enemies.len() >= 10 {
+            return;
+        }
+        let spot = [
+            (2, 0),
+            (-2, 0),
+            (0, 2),
+            (0, -2),
+            (3, 1),
+            (-3, -1),
+            (1, 3),
+            (-1, -3),
+        ]
+        .into_iter()
+        .map(|(dx, dy)| self.relay.offset(dx, dy))
+        .find(|q| {
+            self.floor(*q)
+                && *q != self.player
+                && q.distance(self.player) > 1
+                && !self.enemies.iter().any(|e| e.pos == *q)
+        });
+        let Some(q) = spot else { return };
+        let hp = EnemyKind::Sentinel.max_hp(self.floor);
+        let mut sentinel = Enemy::new(q, EnemyKind::Sentinel, hp);
+        sentinel.awareness = Awareness::Alert;
+        sentinel.last_seen = Some(self.player);
+        self.enemies.push(sentinel);
+        self.reinforcements += 1;
+        self.log(
+            "reinforce",
+            "The Overseer calls for reinforcements: a sentinel answers at the relay.",
+        );
     }
     /// The Custodians answer a restored relay according to how you have treated
     /// them: their units stand down, or the floor locks down and a hunter is
@@ -1512,12 +1814,19 @@ impl Game {
                 self.enemies[i].awareness,
             );
             let who = kind.name().to_lowercase();
+            if kind == EnemyKind::Overseer && awareness == Awareness::Alert {
+                self.overseer_calls(i);
+            }
             let reach = if awareness == Awareness::Alert {
                 kind.sight()
             } else {
                 kind.sight() - 2
             };
-            let sees = p.distance(self.player) <= reach && self.line_clear(p, self.player);
+            let edge = p.distance(self.player) == reach && awareness != Awareness::Alert;
+            // At the very edge of its sight an unwary guard sometimes misses you.
+            let missed = edge && self.roll(i, u64::from(self.turn) + 1000, 3) == 2;
+            let sees =
+                p.distance(self.player) <= reach && !missed && self.line_clear(p, self.player);
             if sees {
                 self.enemies[i].last_seen = Some(self.player);
                 self.enemies[i].patience = if kind == EnemyKind::Hunter { 3 } else { 0 };
@@ -1537,6 +1846,23 @@ impl Game {
                     }
                     continue;
                 }
+                // Each sentinel has its own nerve: it breaks at a third, half or
+                // two thirds of its health gone.
+                let (num, den) = [(1, 2), (1, 3), (2, 3)][self.roll(i, 1, 3) as usize];
+                if kind == EnemyKind::Sentinel
+                    && self.enemies[i].hp * den <= kind.max_hp(self.floor) * num
+                {
+                    if let Some(ally) = self.ally_to_fall_back_on(i) {
+                        if !self.enemies[i].retreating {
+                            self.enemies[i].retreating = true;
+                            self.log("retreat", "A wounded sentinel falls back towards an ally.");
+                        }
+                        let dist = self.distances_from(ally);
+                        self.advance_by(i, &dist, Some(self.player));
+                        continue;
+                    }
+                }
+                self.enemies[i].retreating = false;
                 if p.distance(self.player) == 1 {
                     if self.has(Module::Shield) && self.energy > 0 {
                         self.energy -= 1;
@@ -1561,12 +1887,27 @@ impl Game {
                         break;
                     }
                 } else if kind.advances(self.turn) {
-                    self.advance(i, self.player);
+                    if let Some(post) = self.choke_goal(i) {
+                        self.enemies[i].flank = None;
+                        // Hold the corridor: let them come to it.
+                        if post != p {
+                            self.advance(i, post);
+                        }
+                    } else if let Some((tile, route)) = self.flank_route(i) {
+                        self.enemies[i].flank = Some(tile);
+                        self.advance_by(i, &route, None);
+                    } else {
+                        self.enemies[i].flank = None;
+                        self.advance(i, self.player);
+                    }
                 }
                 continue;
             }
             match awareness {
                 Awareness::Alert => {
+                    if self.keep_flanking(i) {
+                        continue;
+                    }
                     // Hunters keep your trail for a few turns after losing sight.
                     if self.enemies[i].patience > 0 {
                         self.enemies[i].patience -= 1;
@@ -1580,12 +1921,27 @@ impl Game {
                         || self.enemies[i].pos == p && kind.advances(self.turn)
                     {
                         self.enemies[i].awareness = Awareness::Searching;
-                        self.enemies[i].patience = 3;
+                        // Hunters sweep the rooms around them for longer.
+                        let base = if kind == EnemyKind::Hunter { 8 } else { 3 }
+                            + self.roll(i, 4 + u64::from(self.turn), 3);
+                        let plan = self.search_plan(i);
+                        self.enemies[i].patience = plan.map_or(base, |(_, n)| n.max(base));
+                        if let Some((spot, _)) = plan {
+                            self.enemies[i].last_seen = Some(spot);
+                        }
                     }
                 }
                 Awareness::Searching => {
                     if self.enemies[i].patience > 0 {
                         self.enemies[i].patience -= 1;
+                        let mut goal = self.enemies[i].last_seen.filter(|g| *g != p);
+                        if goal.is_none() && kind == EnemyKind::Hunter {
+                            goal = self.sweep_waypoint(i);
+                            self.enemies[i].last_seen = goal;
+                        }
+                        if let Some(goal) = goal.filter(|_| kind.advances(self.turn)) {
+                            self.advance(i, goal);
+                        }
                     } else {
                         self.enemies[i].awareness = Awareness::Idle;
                         self.enemies[i].last_seen = None;
@@ -1877,6 +2233,9 @@ impl Game {
                 .any(|id| !self.records_found.contains(id))
             || self.actions.len() > MAX_ACTIONS
             || self.standing.iter().any(|s| s.abs() > 20)
+            || self.ambush_spots.len() > MAX_AMBUSH_SPOTS
+            || self.ambush_spots.iter().any(|p| !self.floor(*p))
+            || self.reinforcements > MAX_REINFORCEMENTS
         {
             return Err("Invalid loadout or trace".into());
         }
@@ -2377,6 +2736,256 @@ mod tests {
         assert!(g.validate().is_err());
         g.loadout = Module::ALL.to_vec();
         assert!(g.validate().is_err());
+    }
+    /// An open, all-floor room with the player in the middle and no foes.
+    fn arena() -> Game {
+        let mut g = Game::new(2);
+        g.tiles.fill(Tile::Floor);
+        g.enemies.clear();
+        g.loadout.clear(); // no Shield: strikes land on health
+        g.predictable = true; // exact behaviour, no seeded unpredictability
+        g.player = Pos { x: 22, y: 14 };
+        g.update_visibility(7);
+        g
+    }
+    fn foe(g: &mut Game, dx: i32, dy: i32, kind: EnemyKind, hp: i32) -> usize {
+        g.enemies
+            .push(Enemy::new(g.player.offset(dx, dy), kind, hp));
+        g.enemies.len() - 1
+    }
+    #[test]
+    fn a_wounded_sentinel_falls_back_towards_an_ally() {
+        let mut g = arena();
+        let hurt = foe(&mut g, 3, 0, EnemyKind::Sentinel, 3);
+        let ally = foe(&mut g, 8, 0, EnemyKind::Sentinel, 6);
+        g.enemies[hurt].awareness = Awareness::Alert;
+        g.enemies[ally].awareness = Awareness::Alert;
+        let before = g.enemies[hurt].pos;
+        g.wait();
+        let (h, a) = (g.enemies[hurt].pos, g.enemies[ally].pos);
+        assert!(
+            h.distance(a) < before.distance(a),
+            "it moves towards its ally"
+        );
+        assert!(h.distance(g.player) >= before.distance(g.player));
+        assert!(g.enemies[hurt].retreating);
+        assert_eq!(g.hp, MAX_HP, "a retreating sentinel does not strike");
+    }
+    #[test]
+    fn a_wounded_sentinel_with_no_ally_stands_and_fights() {
+        let mut g = arena();
+        let lone = foe(&mut g, 1, 0, EnemyKind::Sentinel, 2);
+        g.enemies[lone].awareness = Awareness::Alert;
+        g.wait();
+        assert_eq!(g.enemies[lone].pos, g.player.offset(1, 0));
+        assert!(g.hp < MAX_HP);
+    }
+    #[test]
+    fn a_wounded_sentinel_beside_an_ally_fights_on() {
+        let mut g = arena();
+        let hurt = foe(&mut g, 1, 0, EnemyKind::Sentinel, 2);
+        foe(&mut g, 2, 0, EnemyKind::Sentinel, 6);
+        g.enemies[hurt].awareness = Awareness::Alert;
+        g.wait();
+        assert!(!g.enemies[hurt].retreating);
+        assert!(g.hp < MAX_HP);
+    }
+    fn at(x: i32, y: i32) -> Pos {
+        Pos { x, y }
+    }
+    /// Solid rock with only the corridors given carved, the player at `player`.
+    fn rock_with(player: Pos, lines: &[(Pos, Pos)]) -> Game {
+        let mut g = arena();
+        g.tiles.fill(Tile::Wall);
+        for (a, b) in lines {
+            g.corridor(*a, *b);
+        }
+        g.player = player;
+        g.update_visibility(7);
+        g
+    }
+    #[test]
+    fn guards_check_the_corner_where_you_ambushed_a_unit() {
+        let mut g = arena();
+        foe(&mut g, 1, 0, EnemyKind::Sentinel, 12);
+        let spot = g.player;
+        g.step(1, 0);
+        assert_eq!(
+            g.ambush_spots,
+            vec![spot],
+            "a strike from cover is remembered"
+        );
+        g.enemies.clear();
+        g.player = at(40, 25);
+        let searcher = g.enemies.len();
+        g.enemies
+            .push(Enemy::new(spot.offset(6, 0), EnemyKind::Sentinel, 6));
+        g.enemies[searcher].awareness = Awareness::Alert;
+        g.enemies[searcher].last_seen = Some(g.enemies[searcher].pos);
+        g.wait();
+        assert_eq!(g.enemies[searcher].awareness, Awareness::Searching);
+        assert_eq!(g.enemies[searcher].last_seen, Some(spot));
+        for _ in 0..6 {
+            g.wait();
+        }
+        assert_eq!(
+            g.enemies[searcher].pos, spot,
+            "it went to look at the corner"
+        );
+        g.validate().unwrap();
+    }
+    #[test]
+    fn only_the_last_few_ambush_corners_are_remembered() {
+        let mut g = arena();
+        for x in 0..6 {
+            g.remember_ambush(at(x, 1));
+        }
+        assert_eq!(g.ambush_spots.len(), MAX_AMBUSH_SPOTS);
+        assert_eq!(g.ambush_spots.last(), Some(&at(5, 1)));
+        g.build_floor(1);
+        assert!(
+            g.ambush_spots.is_empty(),
+            "a new floor starts with no memory"
+        );
+    }
+    #[test]
+    fn a_hunter_that_lost_you_sweeps_nearby_rooms() {
+        let mut g = arena();
+        g.player = at(40, 25);
+        let h = foe(&mut g, -16, -10, EnemyKind::Hunter, 8);
+        g.enemies[h].awareness = Awareness::Searching;
+        g.enemies[h].patience = 8;
+        let start = g.enemies[h].pos;
+        g.wait();
+        assert_ne!(
+            g.enemies[h].pos, start,
+            "it moves rather than standing still"
+        );
+        for _ in 0..7 {
+            g.wait();
+        }
+        assert!(g.enemies[h].pos.distance(start) >= 3);
+    }
+    #[test]
+    fn a_second_guard_goes_round_rather_than_queue_behind_the_first() {
+        // A ring of corridor. The sentinel blocks the west arm between you and a
+        // hunter stuck behind it, so the hunter must go the long way round.
+        let ring = [
+            (at(20, 6), at(25, 6)),
+            (at(25, 6), at(25, 22)),
+            (at(25, 22), at(20, 22)),
+            (at(20, 22), at(20, 6)),
+        ];
+        let mut g = rock_with(at(20, 14), &ring);
+        let lead = foe(&mut g, 0, -4, EnemyKind::Sentinel, 6);
+        let second = foe(&mut g, 0, -7, EnemyKind::Hunter, 8);
+        for i in [lead, second] {
+            g.enemies[i].awareness = Awareness::Alert;
+            g.enemies[i].last_seen = Some(g.player);
+        }
+        let queued = at(20, 8);
+        g.wait();
+        assert_eq!(
+            g.enemies[lead].pos,
+            at(20, 10),
+            "the sentinel holds its corridor"
+        );
+        assert_ne!(
+            g.enemies[second].pos, queued,
+            "it does not step in behind the lead"
+        );
+        assert_eq!(
+            g.enemies[second].pos,
+            at(20, 6),
+            "it sets off round the ring"
+        );
+        for _ in 0..40 {
+            g.hp = MAX_HP; // keep the player alive so the route can be checked
+            g.wait();
+        }
+        let arrived = g.enemies[second].pos;
+        assert_eq!(
+            arrived,
+            at(20, 15),
+            "it came at you from the far side, got {arrived:?}"
+        );
+    }
+    #[test]
+    fn a_lone_guard_just_closes_in() {
+        let mut g = rock_with(at(10, 14), &[(at(5, 14), at(40, 14))]);
+        let hunter = foe(&mut g, 6, 0, EnemyKind::Hunter, 8);
+        g.enemies[hunter].awareness = Awareness::Alert;
+        g.enemies[hunter].last_seen = Some(g.player);
+        g.wait();
+        assert_eq!(g.enemies[hunter].pos, at(15, 14));
+    }
+    #[test]
+    fn a_sentinel_holds_a_corridor_until_you_are_close() {
+        let mut g = rock_with(at(18, 14), &[(at(5, 14), at(40, 14))]);
+        let s = g.enemies.len();
+        g.enemies
+            .push(Enemy::new(at(24, 14), EnemyKind::Sentinel, 6));
+        g.enemies[s].awareness = Awareness::Alert;
+        g.enemies[s].last_seen = Some(g.player);
+        g.wait();
+        assert_eq!(g.enemies[s].pos, at(24, 14), "it holds the corridor");
+        g.player = at(22, 14);
+        g.wait();
+        assert_eq!(g.enemies[s].pos, at(23, 14), "it closes once you are near");
+    }
+    #[test]
+    fn the_overseer_calls_reinforcements_to_the_relay() {
+        let mut g = arena();
+        g.relay = at(30, 14);
+        let o = foe(&mut g, 8, 1, EnemyKind::Overseer, 16);
+        g.enemies[o].awareness = Awareness::Alert;
+        g.enemies[o].last_seen = Some(g.player);
+        g.wait();
+        assert_eq!((g.reinforcements, g.enemies.len()), (1, 2));
+        let call = &g.enemies[1];
+        assert_eq!(call.kind, EnemyKind::Sentinel);
+        assert!(call.pos.distance(g.relay) <= 4 && call.awareness == Awareness::Alert);
+        g.wait();
+        assert_eq!(g.enemies.len(), 2, "one call is not repeated");
+        g.enemies[o].hp = 8;
+        g.wait();
+        assert_eq!(g.enemies.len(), 3, "a second call when it is badly hurt");
+        g.enemies[o].hp = 4;
+        g.wait();
+        assert_eq!(g.enemies.len(), 3, "and no more than that");
+        g.validate().unwrap();
+    }
+    #[test]
+    fn guard_habits_vary_but_replay_exactly() {
+        let mut g = Game::new(11);
+        let habits = |g: &Game| -> Vec<u32> {
+            (0..6)
+                .flat_map(|i| (0..8).map(move |t| (i, t)))
+                .map(|(i, t)| g.roll(i, t, 4))
+                .collect()
+        };
+        let a = habits(&g);
+        assert_eq!(a, habits(&g), "the same seed gives the same habits");
+        assert!(
+            a.iter().collect::<HashSet<_>>().len() == 4,
+            "all outcomes occur"
+        );
+        assert_ne!(a, habits(&Game::new(12)), "another seed, other habits");
+        g.predictable = true;
+        assert!(
+            habits(&g).iter().all(|r| *r == 0),
+            "predictable means textbook"
+        );
+        g.predictable = false;
+        for a in [
+            Action::Wait,
+            Action::Move(1, 0),
+            Action::Wait,
+            Action::Move(0, 1),
+        ] {
+            g.apply(a);
+        }
+        assert!(g.replay_matches());
     }
     #[test]
     fn wall_blocks_sight() {

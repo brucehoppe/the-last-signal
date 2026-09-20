@@ -651,6 +651,8 @@ async fn main() {
                 "pickup" => Some(("SUPPLIES", TEAL)),
                 "pulse" => Some(("PULSE", TEAL)),
                 "alert" => Some(("SPOTTED", CORAL)),
+                "retreat" => Some(("FALLING BACK", AMBER)),
+                "reinforce" => Some(("REINFORCED", CORAL)),
                 "lockdown" => Some(("LOCKDOWN", CORAL)),
                 "standdown" => Some(("TRUCE", TEAL)),
                 _ => None,
