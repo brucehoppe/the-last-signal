@@ -1,11 +1,23 @@
 use macroquad::prelude::*;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::{
+    cell::RefCell,
+    sync::mpsc::{Receiver, TryRecvError},
+};
 use the_last_signal::{
     ai,
-    core::{Game, Outcome, Pos, Tile, HEIGHT, RECORDS, WIDTH},
+    core::{
+        Faction, Game, Module, Outcome, Pos, Tile, ANALYZE_COST, HEIGHT, RECORDS, RECORD_AUTHORS,
+        SCAN_COST, WIDTH,
+    },
     save,
 };
 
+/// "Test all" skips models larger than this (loading many big models at once can
+/// exhaust RAM); test those one at a time instead.
+const TEST_ALL_MAX_GB: f32 = 16.;
+const CONSOLE_ROWS: usize = 6;
+/// Transcript columns that fit the ECHO panel at 17 px in the 0.6em-wide font.
+const CHAT_COLS: usize = 33;
 const INK: Color = Color::new(0.035, 0.055, 0.075, 1.);
 const PANEL: Color = Color::new(0.065, 0.09, 0.115, 1.);
 const LIGHT: Color = Color::new(0.86, 0.89, 0.85, 1.);
@@ -28,29 +40,47 @@ fn seed() -> u64 {
     // miniquad's clock works natively and in the browser; SystemTime panics on wasm.
     (macroquad::miniquad::date::now() * 1000.) as u64
 }
+thread_local! {
+    static FONT: RefCell<Option<Font>> = const { RefCell::new(None) };
+}
+fn init_font() {
+    // JetBrains Mono (SIL OFL, see assets/fonts/OFL.txt): far more legible than
+    // macroquad's built-in bitmap font, and monospaced so wrap widths hold.
+    if let Ok(font) =
+        load_ttf_font_from_bytes(include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"))
+    {
+        FONT.with(|f| *f.borrow_mut() = Some(font));
+    }
+}
+/// How many real pixels one design pixel covers. Glyphs are rasterized at this
+/// scale, so text stays sharp on retina screens and in enlarged windows.
+fn text_scale() -> f32 {
+    (((screen_width() * screen_dpi_scale() / 1280.) * 4.).round() / 4.).clamp(1., 4.)
+}
 fn text(s: &str, x: f32, y: f32, size: f32, color: Color) {
-    draw_text(s, x, y, size, color);
+    let k = text_scale();
+    FONT.with(|f| {
+        draw_text_ex(
+            s,
+            x,
+            y,
+            TextParams {
+                font: f.borrow().as_ref(),
+                font_size: (size * k).round() as u16,
+                font_scale: 1. / k,
+                color,
+                ..Default::default()
+            },
+        )
+    });
 }
 fn lines(s: &str, width: usize) -> Vec<String> {
-    let mut out = vec![];
-    for paragraph in s.lines() {
-        let mut line = String::new();
-        for c in paragraph.chars() {
-            if line.chars().count() >= width {
-                out.push(line);
-                line = String::new();
-            }
-            line.push(c);
-        }
-        out.push(line);
-    }
-    if out.is_empty() {
-        out.push(String::new());
-    }
-    out
+    the_last_signal::wrap::wrap(s, width)
 }
+/// `width` is in legacy columns (tuned for a 0.5em-wide font); JetBrains Mono is
+/// 0.6em wide, so scale to keep every line inside its panel.
 fn wrapped(s: &str, x: f32, y: f32, width: usize, size: f32, color: Color, max: usize) {
-    for (i, l) in lines(s, width).iter().take(max).enumerate() {
+    for (i, l) in lines(s, width * 5 / 6).iter().take(max).enumerate() {
         text(l, x, y + i as f32 * (size + 3.), size, color);
     }
 }
@@ -158,6 +188,27 @@ fn draw_map(g: &Game) {
             );
         }
     }
+    for e in g.enemies.iter().filter(|e| g.can_see(e.pos)) {
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let t = e.pos.offset(dx, dy);
+            if g.floor(t) {
+                draw_rectangle(
+                    28. + t.x as f32 * 19.,
+                    109. + t.y as f32 * 19.,
+                    19.,
+                    19.,
+                    Color::new(0.99, 0.40, 0.34, 0.16),
+                );
+            }
+        }
+        draw_rectangle(
+            30. + e.pos.x as f32 * 19.,
+            110. + e.pos.y as f32 * 19.,
+            15. * (e.hp.clamp(0, 8) as f32 / 8.),
+            3.,
+            CORAL,
+        );
+    }
     for e in &g.enemies {
         if g.can_see(e.pos) {
             text(
@@ -179,6 +230,8 @@ enum Screen {
     Game,
     Pause,
     Journal,
+    Loadout,
+    Console,
     NewConfirm,
 }
 struct Pending {
@@ -195,8 +248,20 @@ async fn main() {
         .find(|w| w[0] == "--seed")
         .and_then(|w| w[1].parse().ok())
         .unwrap_or_else(seed);
-    let mut g = Game::new(initial_seed);
+    init_font();
+    let mut loadout = the_last_signal::core::default_loadout();
+    let mut g = Game::new_with(initial_seed, &loadout);
     let mut screen = Screen::Title;
+    let profile = std::env::var_os("LAST_SIGNAL_PROFILE").is_some();
+    let (mut frames, mut frame_sum, mut frame_max, mut map_sum) = (0u32, 0., 0f32, 0.);
+    let mut console_models: Vec<ai::console::ModelInfo> = vec![];
+    let mut console_sel = 0usize;
+    let mut console_top = 0usize;
+    let mut console_results: Vec<ai::console::Bench> = vec![];
+    let mut console_rx: Option<Receiver<ai::console::Msg>> = None;
+    let mut console_note = String::new();
+    let mut transcript_key = (usize::MAX, usize::MAX);
+    let mut transcript: Vec<(String, Color)> = vec![];
     let path = save::default_path();
     let (mut ai_config, config_error) = match ai::Config::load() {
         Ok(c) => (c, None),
@@ -242,6 +307,35 @@ async fn main() {
                 pending = None;
             }
         }
+        if let Some(rx) = &console_rx {
+            use ai::console::Msg;
+            loop {
+                match rx.try_recv() {
+                    Ok(Msg::Models(Ok(m))) => {
+                        console_note = if m.is_empty() {
+                            "No models installed. In a terminal run: ollama pull <model>".into()
+                        } else {
+                            String::new()
+                        };
+                        console_sel = console_sel.min(m.len().saturating_sub(1));
+                        console_models = m;
+                    }
+                    Ok(Msg::Models(Err(e))) => {
+                        console_models.clear();
+                        console_note = e;
+                    }
+                    Ok(Msg::Bench(b)) => {
+                        console_results.retain(|r| r.model != b.model);
+                        console_results.push(b);
+                    }
+                    Ok(Msg::Done) | Err(TryRecvError::Disconnected) => {
+                        console_rx = None;
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                }
+            }
+        }
         text("THE LAST SIGNAL", 28., 42., 32., LIGHT);
         text("EXPEDITION 01 / THE SILENT RELAY", 29., 65., 15., MUTED);
         text(
@@ -253,7 +347,7 @@ async fn main() {
         );
         text(
             &format!(
-                "HP {:02}/24     MEDKITS {}     SCANNER {}     KEYS {}/3",
+                "HP {:02}/24  MEDKITS {}  POWER {}  KEYS {}/3",
                 g.hp,
                 g.medkits,
                 g.energy,
@@ -261,7 +355,7 @@ async fn main() {
             ),
             465.,
             48.,
-            19.,
+            17.,
             if g.hp < 8 { CORAL } else { TEAL },
         );
         text(
@@ -275,7 +369,31 @@ async fn main() {
             17.,
             AMBER,
         );
+        {
+            let mut x = 465.;
+            let mut chip = |label: String, ok: bool| {
+                text(&label, x, 99., 15., if ok { MUTED } else { CORAL });
+                x += (label.chars().count() + 3) as f32 * 9.;
+            };
+            if g.loadout.is_empty() {
+                chip("NO MODULES FITTED".into(), true);
+            }
+            for m in &g.loadout {
+                match m {
+                    Module::Scanner => {
+                        chip(format!("SCAN [F] -{SCAN_COST}"), g.energy >= SCAN_COST)
+                    }
+                    Module::Shield => chip("SHIELD -1/hit".into(), g.energy >= 1),
+                    Module::Analyzer => chip(
+                        format!("ANALYZE [G] -{ANALYZE_COST}"),
+                        g.energy >= ANALYZE_COST,
+                    ),
+                }
+            }
+        }
+        let map_t = get_time();
         draw_map(&g);
+        map_sum += get_time() - map_t;
         text(
             "YOU  o     ARCHIVE  A     RELAY  R     LIFT  L     SENTINEL  S",
             28.,
@@ -286,20 +404,23 @@ async fn main() {
         for (i, e) in g.events.iter().rev().take(4).enumerate() {
             let msg = format!("{:03}  {}", e.turn, e.text);
             text(
-                &msg.chars().take(95).collect::<String>(),
+                &msg.chars().take(86).collect::<String>(),
                 28.,
                 700. + i as f32 * 20.,
                 16.,
                 if i == 0 { LIGHT } else { MUTED },
             );
         }
-        text(
-            "WASD / ARROWS move    E interact    H heal    F scan    SPACE wait    J journal",
-            28.,
-            788.,
-            15.,
-            MUTED,
-        );
+        match g.hint() {
+            Some(h) => text(&format!("> {h}"), 28., 788., 16., AMBER),
+            None => text(
+                "WASD move   E interact   H heal   F scan   G analyze   SPACE wait   J journal",
+                28.,
+                788.,
+                15.,
+                MUTED,
+            ),
+        }
         draw_rectangle(890., 24., 366., 738., PANEL);
         text("ECHO", 909., 55., 27., TEAL);
         text("LOCAL EXPEDITION COMPANION", 909., 78., 14., MUTED);
@@ -314,17 +435,26 @@ async fn main() {
             15.,
             AMBER,
         );
-        let mut transcript: Vec<(String, Color)> = vec![];
-        if g.chat.is_empty() {
-            transcript.extend(lines("Recover evidence. Ask about what you have found. ECHO only receives discovered game facts, but its advice can still be mistaken.",36).into_iter().map(|l|(l,MUTED)));
-        }
-        for c in &g.chat {
-            transcript.push((
-                if c.role == "user" { "YOU" } else { "ECHO" }.into(),
-                if c.role == "user" { AMBER } else { TEAL },
-            ));
-            transcript.extend(lines(&c.content, 36).into_iter().map(|l| (l, LIGHT)));
-            transcript.push((String::new(), MUTED));
+        // Re-wrapping the whole conversation every frame is wasted work: rebuild
+        // only when the history actually changes.
+        let key = (
+            g.chat.len(),
+            g.chat.iter().map(|c| c.content.len()).sum::<usize>(),
+        );
+        if key != transcript_key {
+            transcript_key = key;
+            transcript.clear();
+            if g.chat.is_empty() {
+                transcript.extend(lines("Recover evidence. Ask about what you have found. ECHO only receives discovered game facts, but its advice can still be mistaken.",CHAT_COLS).into_iter().map(|l|(l,MUTED)));
+            }
+            for c in &g.chat {
+                transcript.push((
+                    if c.role == "user" { "YOU" } else { "ECHO" }.into(),
+                    if c.role == "user" { AMBER } else { TEAL },
+                ));
+                transcript.extend(lines(&c.content, CHAT_COLS).into_iter().map(|l| (l, LIGHT)));
+                transcript.push((String::new(), MUTED));
+            }
         }
         let (mx, my) = mouse_position();
         let vp = vec2(mx * 1280. / screen_width(), my * 800. / screen_height());
@@ -399,7 +529,7 @@ async fn main() {
         if active {
             if focused {
                 while let Some(c) = get_char_pressed() {
-                    if !c.is_control() && prompt.chars().count() < 68 {
+                    if !c.is_control() && prompt.chars().count() < 56 {
                         prompt.push(c);
                     }
                 }
@@ -428,6 +558,8 @@ async fn main() {
                     g.heal();
                 } else if is_key_pressed(KeyCode::F) {
                     g.scan();
+                } else if is_key_pressed(KeyCode::G) {
+                    g.analyze();
                 } else if is_key_pressed(KeyCode::Space) {
                     g.wait();
                 }
@@ -533,6 +665,7 @@ async fn main() {
                     {
                         match save::read(&path) {
                             Ok(loaded) => {
+                                loadout = loaded.loadout.clone();
                                 g = loaded;
                                 screen = Screen::Game;
                                 scroll = 0;
@@ -547,13 +680,300 @@ async fn main() {
                     ) {
                         screen = Screen::NewConfirm;
                     }
-                    wrapped(&status, 217., 626., 92, 17., MUTED, 2);
+                    if !DEMO
+                        && (button(
+                            "AI CONSOLE / C",
+                            Rect::new(217., 591., 225., 36.),
+                            pending.is_none(),
+                        ) || is_key_pressed(KeyCode::C))
+                    {
+                        screen = Screen::Console;
+                        if console_models.is_empty() && console_rx.is_none() {
+                            console_rx = Some(ai::console::spawn_list(ai_config.port));
+                        }
+                    }
+                    if button("LOADOUT / M", Rect::new(909., 541., 170., 42.), g.turn == 0)
+                        || (g.turn == 0 && is_key_pressed(KeyCode::M))
+                    {
+                        screen = Screen::Loadout;
+                    }
+                    wrapped(&status, 217., 652., 92, 17., MUTED, 2);
+                }
+                Screen::Console => {
+                    let busy = console_rx.is_some();
+                    text("AI CONSOLE", 217., 185., 34., LIGHT);
+                    text(
+                        &format!(
+                            "Active: {}   /   Ollama on 127.0.0.1:{}",
+                            ai_config.model, ai_config.port
+                        ),
+                        217.,
+                        216.,
+                        17.,
+                        TEAL,
+                    );
+                    wrapped(
+                        "Tests use this game's rules: no leaking unrecovered records, use recovered ones, valid JSON, brevity. Score out of 100.",
+                        217.,
+                        242.,
+                        84,
+                        15.,
+                        MUTED,
+                        2,
+                    );
+                    if is_key_pressed(KeyCode::Down) {
+                        console_sel = (console_sel + 1).min(console_models.len().saturating_sub(1));
+                    }
+                    if is_key_pressed(KeyCode::Up) {
+                        console_sel = console_sel.saturating_sub(1);
+                    }
+                    if console_sel < console_top {
+                        console_top = console_sel;
+                    } else if console_sel >= console_top + CONSOLE_ROWS {
+                        console_top = console_sel + 1 - CONSOLE_ROWS;
+                    }
+                    let (_, wheel) = mouse_wheel();
+                    if wheel != 0. && console_models.len() > CONSOLE_ROWS {
+                        console_top = if wheel > 0. {
+                            console_top.saturating_sub(1)
+                        } else {
+                            (console_top + 1).min(console_models.len() - CONSOLE_ROWS)
+                        };
+                        console_sel =
+                            console_sel.clamp(console_top, console_top + CONSOLE_ROWS - 1);
+                    }
+                    if console_models.len() > CONSOLE_ROWS {
+                        text(
+                            &format!(
+                                "{} models: showing {}-{} (arrows or wheel to scroll)",
+                                console_models.len(),
+                                console_top + 1,
+                                (console_top + CONSOLE_ROWS).min(console_models.len())
+                            ),
+                            640.,
+                            548.,
+                            15.,
+                            MUTED,
+                        );
+                    }
+                    for (n, m) in console_models
+                        .iter()
+                        .enumerate()
+                        .skip(console_top)
+                        .take(CONSOLE_ROWS)
+                    {
+                        let i = n;
+                        let y = 300. + (n - console_top) as f32 * 38.;
+                        let row = Rect::new(217., y - 22., 846., 32.);
+                        if row.contains(vp) && is_mouse_button_pressed(MouseButton::Left) {
+                            console_sel = i;
+                        }
+                        if i == console_sel {
+                            draw_rectangle(
+                                row.x,
+                                row.y,
+                                row.w,
+                                row.h,
+                                Color::new(0.12, 0.25, 0.25, 1.),
+                            );
+                            draw_rectangle_lines(row.x, row.y, row.w, row.h, 1., TEAL);
+                        }
+                        let name: String = m.name.chars().take(24).collect();
+                        text(&format!("{name:<24}"), 230., y, 17., LIGHT);
+                        text(&format!("{:>5.1} GB", m.size_gb), 500., y, 15., MUTED);
+                        match console_results.iter().find(|r| r.model == m.name) {
+                            Some(b) if b.error.is_some() => {
+                                let e: String =
+                                    b.error.as_deref().unwrap_or("").chars().take(36).collect();
+                                text(&format!("FAILED: {e}"), 610., y, 15., CORAL);
+                            }
+                            Some(b) => text(
+                                &format!(
+                                    "SCORE {:>3}  {:>4.1}s  {}  {}",
+                                    b.score(),
+                                    b.avg_secs,
+                                    if b.leaked { "LEAKS" } else { "no-leak" },
+                                    if b.recalled { "recalls" } else { "no-recall" },
+                                ),
+                                610.,
+                                y,
+                                15.,
+                                if b.score() >= 70 { TEAL } else { AMBER },
+                            ),
+                            None => text("not tested", 610., y, 15., MUTED),
+                        }
+                        if m.name == ai_config.model {
+                            text("[ACTIVE]", 975., y, 15., AMBER);
+                        }
+                    }
+                    if !console_note.is_empty() {
+                        let (y, c) = if console_models.is_empty() {
+                            (322., CORAL)
+                        } else {
+                            (
+                                526.,
+                                if console_note.starts_with("Saved") {
+                                    TEAL
+                                } else {
+                                    CORAL
+                                },
+                            )
+                        };
+                        wrapped(&console_note, 217., y, 90, 16., c, 1);
+                    }
+                    if busy {
+                        text(
+                            &format!(
+                                "Working... {} tested (local models can be slow)",
+                                console_results.len()
+                            ),
+                            217.,
+                            548.,
+                            16.,
+                            AMBER,
+                        );
+                    } else if let Some(b) = ai::console::best(&console_results) {
+                        text(
+                            &format!(
+                                "BEST SO FAR: {} (score {}, {:.1}s)",
+                                b.model,
+                                b.score(),
+                                b.avg_secs
+                            ),
+                            217.,
+                            548.,
+                            16.,
+                            TEAL,
+                        );
+                    }
+                    let have = !console_models.is_empty();
+                    if button("REFRESH / R", Rect::new(217., 562., 150., 36.), !busy)
+                        || (!busy && is_key_pressed(KeyCode::R))
+                    {
+                        console_rx = Some(ai::console::spawn_list(ai_config.port));
+                    }
+                    if button(
+                        "TEST SELECTED / T",
+                        Rect::new(380., 562., 215., 36.),
+                        !busy && have,
+                    ) || (!busy && have && is_key_pressed(KeyCode::T))
+                    {
+                        let name = console_models[console_sel].name.clone();
+                        console_rx = Some(ai::console::spawn_bench(ai_config.clone(), vec![name]));
+                    }
+                    if button(
+                        "TEST ALL / A",
+                        Rect::new(608., 562., 160., 36.),
+                        !busy && have,
+                    ) || (!busy && have && is_key_pressed(KeyCode::A))
+                    {
+                        let all: Vec<String> = console_models
+                            .iter()
+                            .filter(|m| m.size_gb <= TEST_ALL_MAX_GB)
+                            .map(|m| m.name.clone())
+                            .collect();
+                        let skipped = console_models.len() - all.len();
+                        console_note = if skipped > 0 {
+                            format!(
+                                "Skipped {skipped} model(s) over {TEST_ALL_MAX_GB:.0} GB; test those with T."
+                            )
+                        } else {
+                            String::new()
+                        };
+                        console_rx = Some(ai::console::spawn_bench(ai_config.clone(), all));
+                    }
+                    let mut chosen: Option<String> = None;
+                    if button(
+                        "USE SELECTED / ENTER",
+                        Rect::new(781., 562., 260., 36.),
+                        !busy && have,
+                    ) || (!busy && have && is_key_pressed(KeyCode::Enter))
+                    {
+                        chosen = Some(console_models[console_sel].name.clone());
+                    }
+                    let best_model = ai::console::best(&console_results).map(|b| b.model.clone());
+                    if button(
+                        "USE BEST",
+                        Rect::new(217., 612., 150., 36.),
+                        !busy && best_model.is_some(),
+                    ) {
+                        chosen = best_model;
+                    }
+                    if let Some(name) = chosen {
+                        let c = ai::Config {
+                            model: name.clone(),
+                            ..ai_config.clone()
+                        };
+                        match ai::console::save_config(&c) {
+                            Ok(()) => {
+                                ai_config = c;
+                                status = format!("ECHO will now use {name}.");
+                                console_note = format!("Saved {name} to config.json.");
+                            }
+                            Err(e) => console_note = e,
+                        }
+                    }
+                    if button("BACK / ESC", Rect::new(380., 612., 200., 36.), true)
+                        || is_key_pressed(KeyCode::Escape)
+                    {
+                        screen = Screen::Title;
+                    }
+                }
+                Screen::Loadout => {
+                    text("EXPEDITION LOADOUT", 217., 185., 34., LIGHT);
+                    wrapped(
+                        &format!(
+                            "Fit up to {} modules. They all draw on one shared power pool of {}, so every module is a choice about what to spend it on.",
+                            Module::SLOTS,
+                            the_last_signal::core::START_ENERGY
+                        ),
+                        217.,
+                        220.,
+                        88,
+                        18.,
+                        MUTED,
+                        2,
+                    );
+                    for (i, m) in Module::ALL.iter().enumerate() {
+                        let y = 285. + i as f32 * 85.;
+                        let fitted = loadout.contains(m);
+                        let hit =
+                            button(
+                                if fitted { "FITTED" } else { "FIT" },
+                                Rect::new(217., y, 130., 42.),
+                                true,
+                            ) || is_key_pressed([KeyCode::Key1, KeyCode::Key2, KeyCode::Key3][i]);
+                        text(
+                            &format!("{}  [{}]  {}", i + 1, m.key_hint(), m.name()),
+                            370.,
+                            y + 18.,
+                            20.,
+                            if fitted { TEAL } else { LIGHT },
+                        );
+                        text(m.effect(), 370., y + 42., 16., MUTED);
+                        if hit {
+                            if fitted {
+                                loadout.retain(|x| x != m);
+                            } else if loadout.len() < Module::SLOTS {
+                                loadout.push(*m);
+                            } else {
+                                status = "Both slots are full: unfit a module first.".into();
+                            }
+                            g = Game::new_with(g.seed, &loadout);
+                        }
+                    }
+                    if button("DONE / ESC", Rect::new(217., 603., 200., 40.), true)
+                        || is_key_pressed(KeyCode::Escape)
+                        || is_key_pressed(KeyCode::Enter)
+                    {
+                        screen = Screen::Title;
+                    }
                 }
                 Screen::NewConfirm => {
                     text("START A NEW EXPEDITION?", 217., 190., 32., LIGHT);
                     wrapped("Unsaved progress in this window will be replaced. Your existing save file stays unchanged until you press F5.",217.,260.,77,21.,MUTED,4);
                     if button("NEW SEED", Rect::new(217., 410., 230., 42.), true) {
-                        g = Game::new(seed());
+                        g = Game::new_with(seed(), &loadout);
                         screen = Screen::Game;
                         prompt.clear();
                         scroll = 0;
@@ -576,8 +996,14 @@ async fn main() {
                         TEAL,
                     );
                     for (id, record) in RECORDS.iter().enumerate() {
-                        let y = 280. + id as f32 * 95.;
-                        text(&format!("ARCHIVE {:02}", id + 1), 217., y, 18., AMBER);
+                        let y = 265. + id as f32 * 64.;
+                        text(
+                            &format!("ARCHIVE {:02}  /  {}", id + 1, RECORD_AUTHORS[id].name()),
+                            217.,
+                            y,
+                            18.,
+                            AMBER,
+                        );
                         let recovered = g.archives.iter().any(|a| a.id == id && a.recovered);
                         wrapped(
                             if recovered {
@@ -590,8 +1016,21 @@ async fn main() {
                             84,
                             18.,
                             if recovered { LIGHT } else { MUTED },
-                            3,
+                            2,
                         );
+                    }
+                    text("FACTIONS", 217., 492., 18., AMBER);
+                    for (i, f) in Faction::ALL.iter().enumerate() {
+                        let y = 520. + i as f32 * 42.;
+                        let st = g.standing_of(*f);
+                        text(
+                            &format!("{}  {:+}", f.name().to_uppercase(), st),
+                            217.,
+                            y,
+                            17.,
+                            if st < 0 { CORAL } else { TEAL },
+                        );
+                        wrapped(f.about(), 217., y + 19., 96, 15., MUTED, 1);
                     }
                     if button("BACK / ESC", Rect::new(217., 603., 200., 40.), true)
                         || is_key_pressed(KeyCode::Escape)
@@ -602,12 +1041,12 @@ async fn main() {
                 Screen::Game => {}
             }
         } else if g.outcome != Outcome::Exploring {
-            draw_rectangle(185., 263., 540., 164., INK);
+            draw_rectangle(185., 200., 540., 290., INK);
             draw_rectangle_lines(
                 185.,
-                263.,
+                200.,
                 540.,
-                164.,
+                290.,
                 2.,
                 if g.outcome == Outcome::Escaped {
                     TEAL
@@ -622,21 +1061,42 @@ async fn main() {
                     "SIGNAL LOST"
                 },
                 212.,
-                308.,
+                250.,
                 34.,
                 LIGHT,
             );
+            let summary = g.summary();
+            text(summary.rank, 212., 285., 22., AMBER);
+            for (i, l) in summary.lines.iter().take(3).enumerate() {
+                text(l, 212., 318. + i as f32 * 24., 17., LIGHT);
+            }
+            wrapped(&summary.lines[3], 212., 398., 55, 16., MUTED, 2);
             wrapped(
-                "You can still talk to ECHO. ESC opens the menu; F9 loads your saved expedition.",
+                "You can still talk to ECHO. ESC opens the menu.",
                 212.,
-                349.,
-                51,
-                18.,
+                450.,
+                55,
+                15.,
                 MUTED,
-                3,
+                1,
             );
         }
         set_default_camera();
+        if profile {
+            let dt = get_frame_time();
+            frames += 1;
+            frame_sum += dt as f64;
+            frame_max = frame_max.max(dt);
+            if frames == 300 {
+                eprintln!(
+                    "profile: avg frame {:.2} ms, max {:.2} ms, draw_map cpu {:.3} ms/frame",
+                    frame_sum / 300. * 1e3,
+                    frame_max * 1e3,
+                    map_sum / 300. * 1e3
+                );
+                (frames, frame_sum, frame_max, map_sum) = (0, 0., 0., 0.);
+            }
+        }
         next_frame().await;
     }
 }

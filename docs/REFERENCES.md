@@ -37,3 +37,26 @@ All three checked repositories identify their code as MIT-licensed. Their assets
 - Qwen3 4B model tag: https://ollama.com/library/qwen3:4b
 
 Cargo.lock records the resolved dependency versions for this build. Model weights and the Ollama runtime are separately installed and have their own licenses. No claim is made that a reference game's source currently compiles on the user's laptop; this package tests its own original source.
+
+## Lessons carried forward: status
+
+| Reference | Lesson | Implementation |
+|---|---|---|
+| RuggRogue | Understandable screens and systems | Separate game, journal, loadout, AI console, pause and end screens |
+| Electric Organ | Equipment changes how you play | Two-slot loadout of Scanner, Shield and Analyzer sharing one power pool, with costs shown on the HUD |
+| Boat Journey | The companion contributes | ECHO discusses only discovered facts, factions and loadout; a built-in script does the same in the browser demo |
+| RustRoguelike | Traceable, replayable actions | `Action` log plus seed and loadout; `Game::replay_matches` proves a run reproduces exactly, tested on every winning seed |
+| Cogmind | Clear tactical information | Power costs on the HUD, sentinel HP bars, and a danger halo on tiles a sentinel can strike |
+| Caves of Qud | Relationships and history | Wardens and Custodians, record authorship, standing that reacts to play, and an epilogue that reflects it |
+
+## Five additional ideas added in this pass
+
+| Idea | Inspiration | Implementation |
+|---|---|---|
+| Contextual onboarding | Shattered Pixel Dungeon | `Game::hint()`, derived from state so it cannot drift from the rules |
+| Run summary with a rank | Brogue CE / DCSS end-of-run screens | `Game::summary()`: Silent Signal, Warden's Friend, Custodian's Bane, Signal Bearer, Lost Signal |
+| Threat legibility | Brogue CE, Cogmind | Halo and HP bars on visible sentinels |
+| Model choice you can trust | Requested by the player | AI console: discovers installed models, scores them on grounding, leakage, schema, speed and brevity, saves the choice atomically. Cloud-named models are never offered |
+| Readable text | Accessibility | Bundled JetBrains Mono drawn at the real pixel size, sharp on high-DPI screens and in the browser |
+
+Font: JetBrains Mono, Copyright 2020 The JetBrains Mono Project Authors, SIL Open Font License 1.1 (`assets/fonts/OFL.txt`).

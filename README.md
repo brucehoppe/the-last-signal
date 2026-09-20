@@ -15,7 +15,11 @@ Start with **[START-HERE.md](START-HERE.md)**. No reference repositories need to
 - Six connected procedural rooms with reproducible seeds.
 - Wall-blocked field of view, explored-map memory, five sentinels, bump combat.
 - Three recoverable records, an evidence journal, relay restoration and extraction.
-- Health, medkits and scanner pulses; victory and defeat.
+- Health, medkits and a shared **power pool** spent by fitted modules (Scanner Array, Shield Cell, Field Analyzer; two slots, chosen on the Loadout screen); victory and defeat with a ranked epilogue.
+- Two factions, the **Wardens** (the human crew) and the **Custodians** (automated security). Recovering Warden records and restoring the relay raise standing; disabling sentinels lowers the Custodians'. Both show in the journal and ECHO knows them.
+- Contextual onboarding hints, sentinel threat halos and HP bars, and energy costs shown on the HUD.
+- A deterministic **action log**: every run replays from its seed, loadout and actions (`Game::replay_matches`).
+- An **AI console** (title menu, or C) that lists your installed Ollama models, benchmarks them against this game's grounding rules, and saves your pick to `config.json`.
 - An original graphical desktop interface drawn with code, with no external art assets.
 - A real Ollama HTTP integration on a background thread, with JSON-schema responses, timeouts, bounded response size, and no remote fallback URL.
 - A discovered-state context builder and saved conversation history.
@@ -50,7 +54,7 @@ Install and open Ollama, then download a local model:
 ollama pull qwen3:4b
 ```
 
-Click the chat box, type a question, and press Enter. The model is not included in this ZIP. You can play without Ollama. To change the model or port, copy `config.example.json` to `config.json`; configuration is reloaded for every request. Model speed and quality depend on hardware. This is a starting candidate, not a benchmarked best model.
+Open the **AI console** from the title menu to see every installed model, test them (each is asked to avoid leaking a record you have not recovered and to use one you have, and is timed) and pick the best. Or click the chat box, type a question, and press Enter. The model is not included in this ZIP. You can play without Ollama. To change the model or port, copy `config.example.json` to `config.json`; configuration is reloaded for every request. Model speed and quality depend on hardware. This is a starting candidate, not a benchmarked best model.
 
 ## Controls
 
@@ -59,7 +63,9 @@ Click the chat box, type a question, and press Enter. The model is not included 
 | Arrows / WASD | Move; bump a sentinel to attack |
 | E | Interact from the same or an adjacent tile |
 | H | Use a medkit: up to 10 HP, maximum 24 |
-| F | Spend scanner energy to extend sight until the next turn |
+| F | Scanner Array: spend 1 power to extend sight until the next turn |
+| G | Field Analyzer: spend 2 power to pinpoint the nearest unrecovered archive through walls |
+| M / C (title menu) | Loadout screen / AI console |
 | Space | Wait one turn |
 | J | Open recovered evidence |
 | F5 / F9 | Save / load |
@@ -79,3 +85,7 @@ While typing in chat, movement keys enter text. Click outside the box or press E
 - [Validation and limitations](docs/VALIDATION.md)
 
 The source is original to this package. Reference games supplied design and engineering lessons; their source code and assets are not bundled or copied. Original project code is MIT-licensed; dependencies retain their own licenses.
+
+## Performance
+
+The game core runs in microseconds per turn (`cargo test --release --test perf -- --ignored --nocapture`); rendering costs about 0.04 ms of CPU per frame on the map, with the frame rate limited by vsync. The release profile uses LTO and stripping. Fonts: JetBrains Mono (SIL OFL 1.1, `assets/fonts/OFL.txt`).

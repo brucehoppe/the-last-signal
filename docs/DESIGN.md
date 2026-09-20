@@ -14,7 +14,11 @@ The records and objective chain are fixed in version 0.1; geometry changes by se
 
 ## Deliberate limits
 
-No factions, negotiating enemies, generated quests, equipment loadouts, NPC followers, voices, multiplayer, or model training are implemented. ECHO is a conversational companion, not a physical follower. Conversations are text only. Model wording can be inaccurate despite filtered facts and a schema.
+Negotiating enemies, generated quests, NPC followers, voices, multiplayer, and model training are not implemented. Factions are two small standings, not a full reputation system. ECHO is a conversational companion, not a physical follower. Conversations are text only. Model wording can be inaccurate despite filtered facts and a schema.
+
+## Added after the first baseline
+
+Power-module loadouts with a shared power pool, two factions with standing and a ranked epilogue, an action log with deterministic replay, onboarding hints, threat overlays, a bundled legible font, and an AI console that benchmarks local models. See docs/REFERENCES.md for the lesson each one implements.
 
 ## Roadmap
 

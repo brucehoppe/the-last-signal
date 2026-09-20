@@ -53,5 +53,9 @@ fn expeditions_can_be_completed_through_normal_actions() {
         }
         assert_eq!(g.outcome, Outcome::Escaped, "Seed {seed}");
         g.validate().unwrap();
+        assert!(
+            g.replay_matches(),
+            "Seed {seed}: the action log must replay to the same win"
+        );
     }
 }

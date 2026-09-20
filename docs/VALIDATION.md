@@ -54,3 +54,9 @@ Date: 2026-09-20. Environment: Linux x86_64, rustc 1.98.1.
 - Headless win: seeds 1-20 and 42 reach `Escaped` through the normal action API. Save/load is covered by unit tests.
 - Played to a win in the real window (seed 42) by sending real keystrokes (Enter, WASD, E, H, F5, F9) with a route planner reading the F5 save: reached the SIGNAL RECEIVED screen at turn 155 with 3/3 keys and 18/24 HP. F5 saved ("Saved turn N" shown) and an F9 load mid-run resumed correctly. Some early scripted keystrokes were dropped, so an adaptive save-reading loop finished the run.
 - Not done: Ollama-stopped failure path (not stopped, since it is the user's running service) and the death screen in the window.
+
+## Performance and console run (2026-09-20)
+
+Core hot paths, release build, before then after bounding-box visibility and LTO: `update_visibility(7)` 2.20 to 0.92 microseconds, `knowledge()` 66.7 to 52.0 microseconds, `Game::new` 4.3 to 2.0 microseconds. Native binary 2.65 to 1.81 MB; wasm 1.14 to 0.93 MB (359 KB gzipped, including the 270 KB font). In the window, frame time is vsync-bound at 16.7 ms and map drawing costs about 0.04 ms of CPU, so no render cache was added.
+
+AI console against a real Ollama with 11 models: the list scrolls, per-model tests report score, latency, leak and recall, and "use selected" rewrites `config.json` atomically. `qwen3.5:9b` scored 100 (2.5 s). An earlier version wrongly flagged it as leaking because the detector matched the word "evacuation"; it now keys only on "North Station", which exists solely in the unrecovered record, and a regression test covers that. Models over 16 GB are skipped by "Test all" to avoid exhausting RAM.

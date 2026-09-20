@@ -36,7 +36,7 @@ pub fn write(game: &Game, path: &Path) -> Result<(), String> {
     serde_json::to_writer_pretty(
         &mut tmp,
         &Envelope {
-            version: 1,
+            version: 2,
             game: game.clone(),
         },
     )
@@ -59,7 +59,7 @@ pub fn read(path: &Path) -> Result<Game, String> {
     }
     let envelope: Envelope =
         serde_json::from_slice(&bytes).map_err(|e| format!("Invalid save: {e}"))?;
-    if envelope.version != 1 {
+    if !(1..=2).contains(&envelope.version) {
         return Err("Unsupported save version".into());
     }
     envelope.game.validate()?;
