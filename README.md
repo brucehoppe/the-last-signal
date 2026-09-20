@@ -12,9 +12,10 @@ Start with **[START-HERE.md](START-HERE.md)**. No reference repositories need to
 
 ## Included
 
-- Six connected procedural rooms with reproducible seeds.
-- Wall-blocked field of view, explored-map memory, five sentinels, bump combat.
-- Three recoverable records, an evidence journal, relay restoration and extraction.
+- **Three floors** (The Surface Complex, The Coolant Levels, The Signal Vault), each six connected procedural rooms with reproducible seeds. Restoring a floor's relay unlocks its lift; the last lift transmits the signal.
+- Wall-blocked field of view, explored-map memory and bump combat against three foe types: **Sentinels**, **Hunters** (hit for 2, notice you from farther, from floor 2) and an **Overseer** guarding the last relay (heavy: it closes in every other turn).
+- **Equipment found in the world**: you begin with one module; caches (C) hold the others and a slot opens on each floor. Press I to refit (each swap costs a turn).
+- Nine recoverable records across the floors (paged journal), relay restoration and extraction. Each descent restores 8 health, power and a medkit.
 - Health, medkits and a shared **power pool** spent by fitted modules (Scanner Array, Shield Cell, Field Analyzer; two slots, chosen on the Loadout screen); victory and defeat with a ranked epilogue.
 - Two factions, the **Wardens** (the human crew) and the **Custodians** (automated security). Recovering Warden records and restoring the relay raise standing; disabling sentinels lowers the Custodians'. Both show in the journal and ECHO knows them.
 - Contextual onboarding hints, sentinel threat halos and HP bars, and energy costs shown on the HUD.
@@ -64,8 +65,9 @@ Open the **AI console** from the title menu to see every installed model, test t
 | E | Interact from the same or an adjacent tile |
 | H | Use a medkit: up to 10 HP, maximum 24 |
 | F | Scanner Array: spend 1 power to extend sight until the next turn |
+| I | Equipment: fit or unfit found modules (costs a turn) |
 | G | Field Analyzer: spend 2 power to pinpoint the nearest unrecovered archive through walls |
-| M / C (title menu) | Loadout screen / AI console |
+| M / C (title menu) | Starting-module choice / AI console |
 | Space | Wait one turn |
 | J | Open recovered evidence |
 | F5 / F9 | Save / load |

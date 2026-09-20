@@ -6,8 +6,8 @@ use std::{
 use the_last_signal::{
     ai,
     core::{
-        Faction, Game, Module, Outcome, Pos, Tile, ANALYZE_COST, HEIGHT, RECORDS, RECORD_AUTHORS,
-        SCAN_COST, WIDTH,
+        EnemyKind, Faction, Game, Module, Outcome, Pos, Tile, ANALYZE_COST, FLOORS, FLOOR_NAMES,
+        HEIGHT, RECORDS, RECORD_AUTHORS, SCAN_COST, WIDTH,
     },
     save,
 };
@@ -204,21 +204,32 @@ fn draw_map(g: &Game) {
         draw_rectangle(
             30. + e.pos.x as f32 * 19.,
             110. + e.pos.y as f32 * 19.,
-            15. * (e.hp.clamp(0, 8) as f32 / 8.),
+            15. * (e.hp.clamp(0, e.kind.max_hp(g.floor)) as f32 / e.kind.max_hp(g.floor) as f32),
             3.,
             CORAL,
         );
     }
-    for e in &g.enemies {
-        if g.can_see(e.pos) {
-            text(
-                "S",
-                31. + e.pos.x as f32 * 19.,
-                124. + e.pos.y as f32 * 19.,
-                19.,
-                CORAL,
-            );
-        }
+    for c in g.caches.iter().filter(|c| !c.taken && g.discovered(c.pos)) {
+        text(
+            "C",
+            31. + c.pos.x as f32 * 19.,
+            124. + c.pos.y as f32 * 19.,
+            19.,
+            TEAL,
+        );
+    }
+    for e in g.enemies.iter().filter(|e| g.can_see(e.pos)) {
+        text(
+            e.kind.glyph(),
+            31. + e.pos.x as f32 * 19.,
+            124. + e.pos.y as f32 * 19.,
+            19.,
+            match e.kind {
+                EnemyKind::Sentinel => CORAL,
+                EnemyKind::Hunter => AMBER,
+                EnemyKind::Overseer => Color::new(0.85, 0.5, 0.95, 1.),
+            },
+        );
     }
     let px = 37. + g.player.x as f32 * 19.;
     let py = 118. + g.player.y as f32 * 19.;
@@ -231,6 +242,7 @@ enum Screen {
     Pause,
     Journal,
     Loadout,
+    Equip,
     Console,
     NewConfirm,
 }
@@ -257,6 +269,7 @@ async fn main() {
     let mut console_models: Vec<ai::console::ModelInfo> = vec![];
     let mut console_sel = 0usize;
     let mut console_top = 0usize;
+    let mut journal_floor = 0usize;
     let mut console_results: Vec<ai::console::Bench> = vec![];
     let mut console_rx: Option<Receiver<ai::console::Msg>> = None;
     let mut console_note = String::new();
@@ -337,7 +350,18 @@ async fn main() {
             }
         }
         text("THE LAST SIGNAL", 28., 42., 32., LIGHT);
-        text("EXPEDITION 01 / THE SILENT RELAY", 29., 65., 15., MUTED);
+        text(
+            &format!(
+                "FLOOR {}/{}  {}",
+                g.floor + 1,
+                FLOORS,
+                FLOOR_NAMES[g.floor].to_uppercase()
+            ),
+            29.,
+            65.,
+            15.,
+            MUTED,
+        );
         text(
             &format!("SEED {}   /   TURN {:03}", g.seed, g.turn),
             29.,
@@ -395,7 +419,7 @@ async fn main() {
         draw_map(&g);
         map_sum += get_time() - map_t;
         text(
-            "YOU  o     ARCHIVE  A     RELAY  R     LIFT  L     SENTINEL  S",
+            "YOU  o    ARCHIVE  A    RELAY  R    LIFT  L    CACHE  C    FOE  S H O",
             28.,
             672.,
             17.,
@@ -414,7 +438,7 @@ async fn main() {
         match g.hint() {
             Some(h) => text(&format!("> {h}"), 28., 788., 16., AMBER),
             None => text(
-                "WASD move   E interact   H heal   F scan   G analyze   SPACE wait   J journal",
+                "WASD move  E interact  H heal  F scan  G analyze  I equip  SPACE wait  J journal",
                 28.,
                 788.,
                 15.,
@@ -522,6 +546,7 @@ async fn main() {
         );
         if button("JOURNAL / J", Rect::new(1078., 681., 161., 35.), active) {
             screen = Screen::Journal;
+            journal_floor = g.floor;
             focused = false;
         }
         text("F5 save  /  F9 load  /  ESC pause", 907., 744., 16., MUTED);
@@ -563,8 +588,12 @@ async fn main() {
                 } else if is_key_pressed(KeyCode::Space) {
                     g.wait();
                 }
+                if is_key_pressed(KeyCode::I) {
+                    screen = Screen::Equip;
+                }
                 if is_key_pressed(KeyCode::J) {
                     screen = Screen::Journal;
+                    journal_floor = g.floor;
                 }
                 if is_key_pressed(KeyCode::Escape) {
                     screen = Screen::Pause;
@@ -631,7 +660,7 @@ async fn main() {
                         18.,
                         TEAL,
                     );
-                    wrapped("The complex is silent. Three archive fragments hold the keys to its relay. Recover the evidence, transmit the last signal, and return to the surface lift.",217.,270.,76,22.,LIGHT,4);
+                    wrapped("The complex is silent. On each of three floors, recover three archive keys, restore the relay, and take the lift down. Transmit the last signal from the vault.",217.,270.,76,22.,LIGHT,4);
                     wrapped("ECHO is your optional local companion. Ask about discoveries as you explore. Ollama runs separately on your computer; no model is bundled. The expedition remains playable without it.",217.,377.,88,18.,MUTED,4);
                     text(
                         "E interact beside A / R / L    H medkit    F scan    J evidence",
@@ -692,7 +721,7 @@ async fn main() {
                             console_rx = Some(ai::console::spawn_list(ai_config.port));
                         }
                     }
-                    if button("LOADOUT / M", Rect::new(909., 541., 170., 42.), g.turn == 0)
+                    if button("STARTER / M", Rect::new(909., 541., 170., 42.), g.turn == 0)
                         || (g.turn == 0 && is_key_pressed(KeyCode::M))
                     {
                         screen = Screen::Loadout;
@@ -920,11 +949,10 @@ async fn main() {
                     }
                 }
                 Screen::Loadout => {
-                    text("EXPEDITION LOADOUT", 217., 185., 34., LIGHT);
+                    text("STARTING MODULE", 217., 185., 34., LIGHT);
                     wrapped(
                         &format!(
-                            "Fit up to {} modules. They all draw on one shared power pool of {}, so every module is a choice about what to spend it on.",
-                            Module::SLOTS,
+                            "Choose the one module you begin with. The others are found in caches (C) on the way down, and a slot opens on each new floor. All modules draw on one shared power pool of {}.",
                             the_last_signal::core::START_ENERGY
                         ),
                         217.,
@@ -932,14 +960,14 @@ async fn main() {
                         88,
                         18.,
                         MUTED,
-                        2,
+                        3,
                     );
                     for (i, m) in Module::ALL.iter().enumerate() {
-                        let y = 285. + i as f32 * 85.;
-                        let fitted = loadout.contains(m);
+                        let y = 300. + i as f32 * 80.;
+                        let chosen = loadout.contains(m);
                         let hit =
                             button(
-                                if fitted { "FITTED" } else { "FIT" },
+                                if chosen { "CHOSEN" } else { "CHOOSE" },
                                 Rect::new(217., y, 130., 42.),
                                 true,
                             ) || is_key_pressed([KeyCode::Key1, KeyCode::Key2, KeyCode::Key3][i]);
@@ -948,17 +976,11 @@ async fn main() {
                             370.,
                             y + 18.,
                             20.,
-                            if fitted { TEAL } else { LIGHT },
+                            if chosen { TEAL } else { LIGHT },
                         );
                         text(m.effect(), 370., y + 42., 16., MUTED);
-                        if hit {
-                            if fitted {
-                                loadout.retain(|x| x != m);
-                            } else if loadout.len() < Module::SLOTS {
-                                loadout.push(*m);
-                            } else {
-                                status = "Both slots are full: unfit a module first.".into();
-                            }
+                        if hit && !chosen {
+                            loadout = vec![*m];
                             g = Game::new_with(g.seed, &loadout);
                         }
                     }
@@ -967,6 +989,65 @@ async fn main() {
                         || is_key_pressed(KeyCode::Enter)
                     {
                         screen = Screen::Title;
+                    }
+                }
+                Screen::Equip => {
+                    text("EQUIPMENT", 217., 185., 34., LIGHT);
+                    text(
+                        &format!(
+                            "{} of {} slots in use on this floor. Fitting or unfitting takes a turn.",
+                            g.loadout.len(),
+                            g.slots()
+                        ),
+                        217.,
+                        220.,
+                        17.,
+                        TEAL,
+                    );
+                    for (i, m) in Module::ALL.iter().enumerate() {
+                        let y = 285. + i as f32 * 80.;
+                        let owned = g.owned.contains(m);
+                        let fitted = g.has(*m);
+                        if owned {
+                            let hit = button(
+                                if fitted { "UNFIT" } else { "FIT" },
+                                Rect::new(217., y, 130., 42.),
+                                g.outcome == Outcome::Exploring,
+                            ) || is_key_pressed(
+                                [KeyCode::Key1, KeyCode::Key2, KeyCode::Key3][i],
+                            );
+                            if hit {
+                                if fitted {
+                                    g.unfit(*m);
+                                } else {
+                                    g.fit(*m);
+                                }
+                            }
+                        } else {
+                            text("NOT FOUND", 225., y + 26., 16., MUTED);
+                        }
+                        text(
+                            &format!("{}  [{}]  {}", i + 1, m.key_hint(), m.name()),
+                            370.,
+                            y + 18.,
+                            20.,
+                            if fitted {
+                                TEAL
+                            } else if owned {
+                                LIGHT
+                            } else {
+                                MUTED
+                            },
+                        );
+                        text(m.effect(), 370., y + 42., 16., MUTED);
+                    }
+                    if let Some(e) = g.events.last() {
+                        wrapped(&e.text, 217., 545., 96, 16., AMBER, 1);
+                    }
+                    if button("DONE / ESC", Rect::new(217., 603., 200., 40.), true)
+                        || is_key_pressed(KeyCode::Escape)
+                    {
+                        screen = Screen::Game;
                     }
                 }
                 Screen::NewConfirm => {
@@ -995,8 +1076,29 @@ async fn main() {
                         18.,
                         TEAL,
                     );
-                    for (id, record) in RECORDS.iter().enumerate() {
-                        let y = 265. + id as f32 * 64.;
+                    if is_key_pressed(KeyCode::Right) {
+                        journal_floor = (journal_floor + 1).min(g.floor);
+                    }
+                    if is_key_pressed(KeyCode::Left) {
+                        journal_floor = journal_floor.saturating_sub(1);
+                    }
+                    journal_floor = journal_floor.min(g.floor);
+                    text(
+                        &format!(
+                            "FLOOR {}/{}  {}   (LEFT / RIGHT)",
+                            journal_floor + 1,
+                            FLOORS,
+                            FLOOR_NAMES[journal_floor].to_uppercase()
+                        ),
+                        217.,
+                        248.,
+                        16.,
+                        AMBER,
+                    );
+                    for n in 0..3 {
+                        let id = journal_floor * 3 + n;
+                        let record = RECORDS[id];
+                        let y = 285. + n as f32 * 72.;
                         text(
                             &format!("ARCHIVE {:02}  /  {}", id + 1, RECORD_AUTHORS[id].name()),
                             217.,
@@ -1004,7 +1106,7 @@ async fn main() {
                             18.,
                             AMBER,
                         );
-                        let recovered = g.archives.iter().any(|a| a.id == id && a.recovered);
+                        let recovered = g.records_found.contains(&id);
                         wrapped(
                             if recovered {
                                 record
@@ -1019,9 +1121,9 @@ async fn main() {
                             2,
                         );
                     }
-                    text("FACTIONS", 217., 492., 18., AMBER);
+                    text("FACTIONS", 217., 514., 18., AMBER);
                     for (i, f) in Faction::ALL.iter().enumerate() {
-                        let y = 520. + i as f32 * 42.;
+                        let y = 540. + i as f32 * 40.;
                         let st = g.standing_of(*f);
                         text(
                             &format!("{}  {:+}", f.name().to_uppercase(), st),
@@ -1032,7 +1134,7 @@ async fn main() {
                         );
                         wrapped(f.about(), 217., y + 19., 96, 15., MUTED, 1);
                     }
-                    if button("BACK / ESC", Rect::new(217., 603., 200., 40.), true)
+                    if button("BACK / ESC", Rect::new(217., 640., 200., 40.), true)
                         || is_key_pressed(KeyCode::Escape)
                     {
                         screen = Screen::Game;

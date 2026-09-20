@@ -8,7 +8,7 @@ The player is an expedition operator inside an abandoned complex. ECHO is a dama
 
 ## Implemented slice
 
-One floor of six connected rooms. Three authored archive records unlock a relay. Restore it, then return to the starting lift. Five sentinels provide simple combat. Health, medkits, and scanner energy supply limited resources. A seed reproduces the map. Victory and death both leave chat available for discussion.
+Three floors of six connected rooms each. On every floor, three authored archive records unlock a relay; restore it, then return to the lift, which descends (or, on the last floor, transmits and wins). Foes escalate: five sentinels on floor 1, then four plus a hunter, then three plus two hunters and an Overseer. Modules are found in caches, with one slot opening per floor. Health, medkits, and scanner energy supply limited resources. A seed reproduces the map. Victory and death both leave chat available for discussion.
 
 The records and objective chain are fixed in version 0.1; geometry changes by seed. ECHO's messages do not change mechanics. Scanner pulses extend sight but do not penetrate walls, and expire on the next turn.
 
@@ -34,7 +34,7 @@ Add a richer authored evidence graph. Each recovered record should reveal an opt
 
 Expose small read-only functions such as visible-threat summaries and known-route queries. Let Rust calculate routes; do not ask the LLM to invent directions. If tool execution is introduced, use a closed action schema and check current state before each action. Requests need request IDs, run IDs, and snapshot turns.
 
-### Milestone 4: one distinctive resource choice
+### Milestone 4: one distinctive resource choice (implemented as found-in-the-world power modules)
 
 Introduce power modules with competing needs: scanner, shield, and analysis. Every choice needs visible costs and benefits. Avoid making model latency a gameplay penalty or requiring high-end hardware to win.
 

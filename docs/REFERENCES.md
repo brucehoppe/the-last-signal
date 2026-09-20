@@ -49,6 +49,14 @@ Cargo.lock records the resolved dependency versions for this build. Model weight
 | Cogmind | Clear tactical information | Power costs on the HUD, sentinel HP bars, and a danger halo on tiles a sentinel can strike |
 | Caves of Qud | Relationships and history | Wardens and Custodians, record authorship, standing that reacts to play, and an epilogue that reflects it |
 
+## Depth added after the first pass
+
+| Idea | Inspiration | Implementation |
+|---|---|---|
+| Descending floors with rising difficulty | Brogue CE, Shattered Pixel Dungeon | Three generated floors, a rest bay on each descent, and foe mix and toughness that escalate |
+| More enemy types | Cogmind, Brogue CE | Sentinel, Hunter (2 damage, longer sight) and a slow, heavy Overseer boss, each with its own glyph |
+| Equipment found in the world | Electric Organ, Cogmind | One starting module, caches (C) holding the others, slots that grow with depth, and a refit screen where every swap costs a turn |
+
 ## Five additional ideas added in this pass
 
 | Idea | Inspiration | Implementation |

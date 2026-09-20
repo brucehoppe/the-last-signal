@@ -3,10 +3,25 @@ use std::collections::HashSet;
 
 pub const WIDTH: i32 = 44;
 pub const HEIGHT: i32 = 28;
-pub const RECORDS: [&str; 3] = [
+pub const FLOORS: usize = 3;
+pub const MAX_HP: i32 = 24;
+pub const MAX_MEDKITS: u32 = 5;
+pub const FLOOR_NAMES: [&str; FLOORS] = [
+    "The Surface Complex",
+    "The Coolant Levels",
+    "The Signal Vault",
+];
+/// Nine records, three per floor (id / 3 = floor).
+pub const RECORDS: [&str; 9] = [
     "Maintenance 04: The relay failed after coolant was diverted to the sealed lower levels.",
     "Evacuation 11: Survivors left through the surface lift. Their destination was North Station.",
     "Operator 19: Restore the relay using all three archive keys, then return to the surface lift.",
+    "Maintenance 22: The coolant was diverted on purpose. The sealed levels were flooded to stop a failing reactor.",
+    "Warden Log 07: We sealed the lower levels behind us. The Custodians would not let us carry the archives out.",
+    "Custodian Directive 3: Sentinels hold every relay until the Wardens return. This order was never rescinded.",
+    "Warden Log 31: North Station has a mast. If the relay signal reaches it, the network wakes and the Custodians stand down.",
+    "Custodian Directive 9: Standing down requires an authorised Warden signal. None has been received.",
+    "Operator 40: Transmit from the vault lift. Whoever reads this: the Custodians were never enemies, only unfinished.",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -30,10 +45,66 @@ pub enum Tile {
     Wall,
     Floor,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EnemyKind {
+    #[default]
+    Sentinel,
+    Hunter,
+    Overseer,
+}
+impl EnemyKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            EnemyKind::Sentinel => "Sentinel",
+            EnemyKind::Hunter => "Hunter",
+            EnemyKind::Overseer => "Overseer",
+        }
+    }
+    pub fn glyph(self) -> &'static str {
+        match self {
+            EnemyKind::Sentinel => "S",
+            EnemyKind::Hunter => "H",
+            EnemyKind::Overseer => "O",
+        }
+    }
+    pub fn damage(self) -> i32 {
+        match self {
+            EnemyKind::Sentinel => 1,
+            _ => 2,
+        }
+    }
+    /// How far it notices you.
+    pub fn sight(self) -> i32 {
+        match self {
+            EnemyKind::Sentinel => 7,
+            _ => 9,
+        }
+    }
+    pub fn max_hp(self, floor: usize) -> i32 {
+        match self {
+            EnemyKind::Sentinel => 6 + floor as i32,
+            EnemyKind::Hunter => 5 + floor as i32,
+            EnemyKind::Overseer => 12,
+        }
+    }
+    /// The Overseer is heavy: it closes in only every other turn (it still strikes every turn).
+    fn advances(self, turn: u32) -> bool {
+        self != EnemyKind::Overseer || turn.is_multiple_of(2)
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Enemy {
     pub pos: Pos,
     pub hp: i32,
+    #[serde(default)]
+    pub kind: EnemyKind,
+}
+/// Equipment lying in the complex: a module you can take with E.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Cache {
+    pub pos: Pos,
+    pub module: Module,
+    pub taken: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Archive {
@@ -55,7 +126,8 @@ pub enum Module {
 }
 impl Module {
     pub const ALL: [Module; 3] = [Module::Scanner, Module::Shield, Module::Analyzer];
-    pub const SLOTS: usize = 2;
+    /// Slots open up as you descend: one per floor, up to this many.
+    pub const MAX_SLOTS: usize = 3;
     pub fn name(self) -> &'static str {
         match self {
             Module::Scanner => "Scanner Array",
@@ -80,8 +152,9 @@ impl Module {
         }
     }
 }
+/// The single module you begin with; the others are found in caches.
 pub fn default_loadout() -> Vec<Module> {
-    vec![Module::Scanner, Module::Shield]
+    vec![Module::Shield]
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Faction {
@@ -98,13 +171,25 @@ impl Faction {
     }
     pub fn about(self) -> &'static str {
         match self {
-            Faction::Wardens => "The complex's human crew, who evacuated through the surface lift and kept the archives.",
-            Faction::Custodians => "The complex's automated security. Sentinels are theirs, and they still guard the relay.",
+            Faction::Wardens => "The human crew who evacuated and kept the archives.",
+            Faction::Custodians => {
+                "The automated security. Sentinels are theirs; they still guard the relays."
+            }
         }
     }
 }
 /// Which faction authored each archive record (index = record id).
-pub const RECORD_AUTHORS: [Faction; 3] = [Faction::Custodians, Faction::Wardens, Faction::Wardens];
+pub const RECORD_AUTHORS: [Faction; 9] = [
+    Faction::Custodians,
+    Faction::Wardens,
+    Faction::Wardens,
+    Faction::Custodians,
+    Faction::Wardens,
+    Faction::Custodians,
+    Faction::Wardens,
+    Faction::Custodians,
+    Faction::Wardens,
+];
 /// A player action. The ordered list of these plus the seed and loadout is
 /// enough to replay a whole expedition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +200,8 @@ pub enum Action {
     Scan,
     Analyze,
     Interact,
+    Fit(Module),
+    Unfit(Module),
 }
 #[derive(Clone, Debug)]
 pub struct Summary {
@@ -171,6 +258,18 @@ pub struct Game {
     /// Standing with `Faction::ALL`, in the same order.
     #[serde(default)]
     pub standing: [i32; 2],
+    /// 0-based floor index. `archives`, `enemies`, `caches`, the map and the lift
+    /// are all for this floor only.
+    #[serde(default)]
+    pub floor: usize,
+    /// Every module you have found; `loadout` is the subset currently fitted.
+    #[serde(default)]
+    pub owned: Vec<Module>,
+    /// Ids of every record recovered on any floor.
+    #[serde(default)]
+    pub records_found: Vec<usize>,
+    #[serde(default)]
+    pub caches: Vec<Cache>,
 }
 struct Rng(u64);
 impl Rng {
@@ -189,8 +288,13 @@ impl Game {
     pub fn new(seed: u64) -> Self {
         Self::new_with(seed, &default_loadout())
     }
-    pub fn new_with(seed: u64, loadout: &[Module]) -> Self {
-        let mut rng = Rng(seed.max(1));
+    pub fn new_with(seed: u64, starter: &[Module]) -> Self {
+        let mut fitted: Vec<Module> = vec![];
+        for m in starter {
+            if !fitted.contains(m) && fitted.is_empty() {
+                fitted.push(*m);
+            }
+        }
         let mut g = Self {
             seed,
             tiles: vec![Tile::Wall; (WIDTH * HEIGHT) as usize],
@@ -201,7 +305,7 @@ impl Game {
             relay: Pos { x: 0, y: 0 },
             enemies: vec![],
             archives: vec![],
-            hp: 24,
+            hp: MAX_HP,
             medkits: 3,
             energy: START_ENERGY,
             turn: 0,
@@ -209,12 +313,34 @@ impl Game {
             outcome: Outcome::Exploring,
             events: vec![],
             chat: vec![],
-            loadout: loadout.to_vec(),
+            loadout: fitted.clone(),
+            owned: fitted,
             actions: vec![],
             replayable: true,
             kills: 0,
             standing: [0, 0],
+            floor: 0,
+            records_found: vec![],
+            caches: vec![],
         };
+        g.build_floor(0);
+        g
+    }
+    /// Module slots open on the current floor.
+    pub fn slots(&self) -> usize {
+        (1 + self.floor).min(Module::MAX_SLOTS)
+    }
+    /// Lay out floor `floor`: rooms, lift, relay, archives, foes and equipment.
+    /// Floor 0 is generated exactly as it always was for a given seed.
+    fn build_floor(&mut self, floor: usize) {
+        let mut rng = Rng((self.seed ^ (floor as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)).max(1));
+        self.tiles.fill(Tile::Wall);
+        self.seen.fill(false);
+        self.visible.fill(false);
+        self.enemies.clear();
+        self.archives.clear();
+        self.caches.clear();
+        self.restored = false;
         let mut centers = vec![];
         for row in 0..2 {
             for col in 0..3 {
@@ -224,7 +350,7 @@ impl Game {
                 let h = rng.range(7, 10);
                 for yy in y..y + h {
                     for xx in x..x + w {
-                        g.carve(Pos { x: xx, y: yy });
+                        self.carve(Pos { x: xx, y: yy });
                     }
                 }
                 let p = Pos {
@@ -232,33 +358,77 @@ impl Game {
                     y: y + h / 2,
                 };
                 if let Some(prev) = centers.last().copied() {
-                    g.corridor(prev, p);
+                    self.corridor(prev, p);
                 }
                 centers.push(p);
             }
         }
-        g.player = centers[0];
-        g.lift = centers[0];
-        g.relay = centers[5];
-        for (id, &pos) in centers[2..5].iter().enumerate() {
-            g.archives.push(Archive {
+        self.player = centers[0];
+        self.lift = centers[0];
+        self.relay = centers[5];
+        for (i, &pos) in centers[2..5].iter().enumerate() {
+            self.archives.push(Archive {
                 pos,
-                id,
+                id: floor * 3 + i,
                 recovered: false,
             });
         }
-        for (i, &c) in centers.iter().enumerate().skip(1) {
-            g.enemies.push(Enemy {
+        // Deeper floors trade sentinels for tougher foes instead of adding to the crowd.
+        for (i, &c) in centers.iter().enumerate().skip(1 + floor) {
+            let bonus = if i == 5 { 2 } else { 0 };
+            self.enemies.push(Enemy {
                 pos: c.offset(2, 1),
-                hp: if i == 5 { 8 } else { 6 },
+                hp: EnemyKind::Sentinel.max_hp(floor) + bonus,
+                kind: EnemyKind::Sentinel,
             });
         }
-        g.log(
-            "arrival",
-            "Surface lift reached. Recover three archives, restore the relay, and return here.",
-        );
-        g.update_visibility(7);
-        g
+        // Hunters join from floor 2: one more on each deeper floor.
+        for h in 0..floor {
+            self.enemies.push(Enemy {
+                pos: centers[2 + h].offset(-2, -1),
+                hp: EnemyKind::Hunter.max_hp(floor),
+                kind: EnemyKind::Hunter,
+            });
+        }
+        // The Overseer guards the final relay.
+        if floor == FLOORS - 1 {
+            self.enemies.push(Enemy {
+                pos: centers[5].offset(-2, 1),
+                hp: EnemyKind::Overseer.max_hp(floor),
+                kind: EnemyKind::Overseer,
+            });
+        }
+        // One cache per early floor, always holding a module you do not have yet.
+        let missing: Vec<Module> = Module::ALL
+            .iter()
+            .copied()
+            .filter(|m| !self.owned.contains(m))
+            .collect();
+        if floor < FLOORS - 1 && !missing.is_empty() {
+            let module = missing[rng.range(0, missing.len() as i32) as usize];
+            self.caches.push(Cache {
+                pos: centers[1].offset(-2, 1),
+                module,
+                taken: false,
+            });
+        }
+        if floor == 0 {
+            self.log(
+                "arrival",
+                "Surface lift reached. Recover three archives, restore the relay, and return here.",
+            );
+        } else {
+            self.log(
+                "arrival",
+                &format!(
+                    "Floor {} of {}: {}. Recover three archives, restore the relay, and return to the lift.",
+                    floor + 1,
+                    FLOORS,
+                    FLOOR_NAMES[floor]
+                ),
+            );
+        }
+        self.update_visibility(7);
     }
     pub fn index(p: Pos) -> Option<usize> {
         if p.x >= 0 && p.y >= 0 && p.x < WIDTH && p.y < HEIGHT {
@@ -372,6 +542,8 @@ impl Game {
             Action::Scan => self.scan(),
             Action::Analyze => self.analyze(),
             Action::Interact => self.interact(),
+            Action::Fit(m) => self.fit(m),
+            Action::Unfit(m) => self.unfit(m),
         }
     }
     pub fn replay(seed: u64, loadout: &[Module], actions: &[Action]) -> Self {
@@ -395,6 +567,10 @@ impl Game {
             && r.turn == self.turn
             && r.outcome == self.outcome
             && r.restored == self.restored
+            && r.floor == self.floor
+            && r.owned == self.owned
+            && r.loadout == self.loadout
+            && r.records_found == self.records_found
             && r.kills == self.kills
             && r.standing == self.standing
             && r.recovered() == self.recovered()
@@ -541,6 +717,55 @@ impl Game {
         );
         self.finish_turn();
     }
+    /// Fit an owned module into a free slot. Takes a turn.
+    pub fn fit(&mut self, m: Module) {
+        if self.outcome != Outcome::Exploring {
+            return;
+        }
+        if !self.owned.contains(&m) || self.loadout.contains(&m) {
+            return;
+        }
+        if self.loadout.len() >= self.slots() {
+            self.log("status", "No free module slot. Unfit one first.");
+            return;
+        }
+        self.record(Action::Fit(m));
+        self.loadout.push(m);
+        self.log("equip", &format!("Fitted the {}.", m.name()));
+        self.finish_turn();
+    }
+    /// Remove a fitted module (it stays owned). Takes a turn.
+    pub fn unfit(&mut self, m: Module) {
+        if self.outcome != Outcome::Exploring || !self.loadout.contains(&m) {
+            return;
+        }
+        self.record(Action::Unfit(m));
+        self.loadout.retain(|x| *x != m);
+        self.log("equip", &format!("Unfitted the {}.", m.name()));
+        self.finish_turn();
+    }
+    fn descend(&mut self) {
+        self.floor += 1;
+        self.hp = (self.hp + 8).min(MAX_HP);
+        self.medkits = (self.medkits + 1).min(MAX_MEDKITS);
+        self.energy = START_ENERGY;
+        self.turn += 1;
+        let f = self.floor;
+        self.build_floor(f);
+        let slots = self.slots();
+        for m in self.owned.clone() {
+            if !self.loadout.contains(&m) && self.loadout.len() < slots {
+                self.loadout.push(m);
+            }
+        }
+        self.log(
+            "descend",
+            &format!(
+                "Rest bay: +8 health, +1 medkit, power restored. {} module slots open.",
+                slots
+            ),
+        );
+    }
     pub fn interact(&mut self) {
         if self.outcome != Outcome::Exploring {
             return;
@@ -553,6 +778,9 @@ impl Game {
             self.record(Action::Interact);
             self.archives[i].recovered = true;
             let id = self.archives[i].id;
+            if !self.records_found.contains(&id) {
+                self.records_found.push(id);
+            }
             self.log("archive", RECORDS[id]);
             if RECORD_AUTHORS[id] == Faction::Wardens {
                 self.shift_standing(Faction::Wardens, 1);
@@ -560,29 +788,63 @@ impl Game {
             self.finish_turn();
             return;
         }
+        if let Some(i) = self
+            .caches
+            .iter()
+            .position(|c| !c.taken && c.pos.distance(self.player) <= 1)
+        {
+            self.record(Action::Interact);
+            self.caches[i].taken = true;
+            let m = self.caches[i].module;
+            if !self.owned.contains(&m) {
+                self.owned.push(m);
+            }
+            let fitted = self.loadout.len() < self.slots();
+            if fitted {
+                self.loadout.push(m);
+            }
+            self.log(
+                "cache",
+                &format!(
+                    "Recovered a {} from the cache{}",
+                    m.name(),
+                    if fitted {
+                        " and fitted it."
+                    } else {
+                        ". Every slot is full: open Equipment (I) to swap."
+                    }
+                ),
+            );
+            self.finish_turn();
+            return;
+        }
         if self.player.distance(self.relay) <= 1 {
             if self.recovered() == 3 && !self.restored {
                 self.record(Action::Interact);
                 self.restored = true;
-                self.log("relay", "Relay restored. Return to the surface lift.");
+                self.log("relay", "Relay restored. Return to the lift.");
                 self.shift_standing(Faction::Wardens, 1);
                 self.shift_standing(Faction::Custodians, 1);
                 self.finish_turn();
             } else if !self.restored {
                 self.log("status", "Relay needs three recovered archive keys.");
             } else {
-                self.log("status", "Relay is online. Return to the surface lift.");
+                self.log("status", "Relay is online. Return to the lift.");
             }
             return;
         }
         if self.player.distance(self.lift) <= 1 {
             if self.restored {
                 self.record(Action::Interact);
-                self.outcome = Outcome::Escaped;
-                self.log(
-                    "escape",
-                    "Signal transmitted. You escaped with the recovered evidence.",
-                );
+                if self.floor + 1 < FLOORS {
+                    self.descend();
+                } else {
+                    self.outcome = Outcome::Escaped;
+                    self.log(
+                        "escape",
+                        "Signal transmitted. You escaped with the recovered evidence.",
+                    );
+                }
             } else {
                 self.log("status", "Restore the relay before departure.");
             }
@@ -590,24 +852,28 @@ impl Game {
         }
         self.log(
             "status",
-            "Nothing to interact with here. Stand beside an archive, relay, or lift.",
+            "Nothing to interact with here. Stand beside an archive, cache, relay, or lift.",
         );
     }
     fn finish_turn(&mut self) {
         self.turn += 1;
         for i in 0..self.enemies.len() {
-            let p = self.enemies[i].pos;
+            let (p, kind) = (self.enemies[i].pos, self.enemies[i].kind);
             if p.distance(self.player) == 1 {
+                let who = kind.name().to_lowercase();
                 if self.has(Module::Shield) && self.energy > 0 {
                     self.energy -= 1;
                     self.log(
                         "shield",
-                        "Shield Cell absorbed a sentinel strike (-1 power).",
+                        &format!("Shield Cell absorbed a {who} strike (-1 power)."),
                     );
                     continue;
                 }
-                self.hp -= 1;
-                self.log("damage", "A sentinel strikes you for 1 damage.");
+                self.hp -= kind.damage();
+                self.log(
+                    "damage",
+                    &format!("A {who} strikes you for {} damage.", kind.damage()),
+                );
                 if self.hp <= 0 {
                     self.hp = 0;
                     self.outcome = Outcome::Dead;
@@ -617,7 +883,10 @@ impl Game {
                     );
                     break;
                 }
-            } else if p.distance(self.player) <= 7 && self.line_clear(p, self.player) {
+            } else if kind.advances(self.turn)
+                && p.distance(self.player) <= kind.sight()
+                && self.line_clear(p, self.player)
+            {
                 let mut choices = [
                     p.offset(1, 0),
                     p.offset(-1, 0),
@@ -681,7 +950,7 @@ impl Game {
             .any(|e| e.pos.distance(self.player) == 1)
         {
             return Some(
-                "A sentinel is adjacent: bump into it to strike for 3. It hits back for 1.",
+                "A foe is adjacent: bump into it to strike for 3. Sentinels hit for 1, Hunters and Overseers for 2.",
             );
         }
         if self.hp <= 10 && self.medkits > 0 {
@@ -689,7 +958,7 @@ impl Game {
         }
         if self.enemies.iter().any(|e| self.can_see(e.pos)) {
             return Some(
-                "Sentinel in sight (S). Let it come to you in a corridor, then strike first.",
+                "Foe in sight (S sentinel, H hunter, O overseer). Fight in a corridor and strike first.",
             );
         }
         if self
@@ -699,6 +968,13 @@ impl Game {
         {
             return Some("Press E beside an archive (A) to recover its record.");
         }
+        if self
+            .caches
+            .iter()
+            .any(|c| !c.taken && c.pos.distance(self.player) <= 1)
+        {
+            return Some("Press E beside a cache (C) to take the module inside.");
+        }
         if self.recovered() == 3 && !self.restored {
             return Some(if self.relay.distance(self.player) <= 1 {
                 "Press E at the relay (R) to restore it."
@@ -707,7 +983,11 @@ impl Game {
             });
         }
         if self.restored {
-            return Some("Relay online. Return to the lift (L) and press E to transmit.");
+            return Some(if self.floor + 1 < FLOORS {
+                "Relay online. Return to the lift (L) and press E to descend."
+            } else {
+                "Relay online. Return to the lift (L) and press E to transmit."
+            });
         }
         if self.recovered() == 0 && self.turn < 25 {
             return Some("Explore to find archives (A). Scan (F) or analyze (G) if fitted; each costs power.");
@@ -721,8 +1001,8 @@ impl Game {
             Outcome::Dead => "Lost Signal",
             Outcome::Exploring => "Expedition in progress",
             Outcome::Escaped if self.kills == 0 => "Silent Signal",
-            Outcome::Escaped if self.kills >= 4 => "Custodian's Bane",
-            Outcome::Escaped if wardens >= 3 => "Warden's Friend",
+            Outcome::Escaped if self.kills >= 10 => "Custodian's Bane",
+            Outcome::Escaped if wardens >= 6 => "Warden's Friend",
             Outcome::Escaped => "Signal Bearer",
         };
         let epilogue = match self.outcome {
@@ -736,10 +1016,13 @@ impl Game {
         Summary {
             rank,
             lines: vec![
-                format!("Turns {}   Sentinels disabled {}", self.turn, self.kills),
+                format!("Turns {}   Foes disabled {}", self.turn, self.kills),
                 format!(
-                    "Archives {}/3   Power left {}",
-                    self.recovered(),
+                    "Floor {}/{}   Records {}/{}   Power left {}",
+                    self.floor + 1,
+                    FLOORS,
+                    self.records_found.len(),
+                    RECORDS.len(),
                     self.energy
                 ),
                 format!("Wardens {wardens:+}   Custodians {custodians:+}"),
@@ -748,17 +1031,14 @@ impl Game {
         }
     }
     pub fn knowledge(&self) -> serde_json::Value {
-        let facts: Vec<&str> = self
-            .archives
-            .iter()
-            .filter(|a| a.recovered)
-            .map(|a| RECORDS[a.id])
-            .collect();
+        let mut ids = self.records_found.clone();
+        ids.sort_unstable();
+        let facts: Vec<&str> = ids.iter().map(|&id| RECORDS[id]).collect();
         let threats: Vec<_> = self
             .enemies
             .iter()
             .filter(|e| self.can_see(e.pos))
-            .map(|e| serde_json::json!({"position":e.pos,"hp":e.hp,"type":"sentinel"}))
+            .map(|e| serde_json::json!({"position":e.pos,"hp":e.hp,"type":e.kind.name().to_lowercase()}))
             .collect();
         let landmarks: Vec<_> = self
             .archives
@@ -783,7 +1063,29 @@ impl Game {
                 serde_json::json!({"target":kind,"position":pos,"steps":steps,"as_of_turn":self.turn})
             })
             .collect();
-        serde_json::json!({"turn":self.turn,"known_routes":routes,"position":self.player,"hp":self.hp,"medkits":self.medkits,"power":self.energy,"loadout":self.loadout.iter().map(|m|m.name()).collect::<Vec<_>>(),"factions":Faction::ALL.iter().map(|f|serde_json::json!({"name":f.name(),"about":f.about(),"standing":self.standing_of(*f)})).collect::<Vec<_>>(),"keys_recovered":self.recovered(),"relay_restored":self.restored,"outcome":self.outcome,"discovered_records":facts,"visible_threats":threats,"known_archives":landmarks,"known_lift":self.lift,"known_relay":if self.discovered(self.relay){Some(self.relay)}else{None},"recent_events":self.events.iter().rev().take(16).collect::<Vec<_>>()})
+        serde_json::json!({"turn":self.turn,"known_routes":routes,"position":self.player,"hp":self.hp,"medkits":self.medkits,"power":self.energy,"loadout":self.loadout.iter().map(|m|m.name()).collect::<Vec<_>>(),"owned_modules":self.owned.iter().map(|m|m.name()).collect::<Vec<_>>(),"module_slots":self.slots(),"floor":{"number":self.floor+1,"of":FLOORS,"name":FLOOR_NAMES[self.floor]},"known_caches":self.caches.iter().filter(|c|!c.taken&&self.discovered(c.pos)).map(|c|c.pos).collect::<Vec<_>>(),"factions":Faction::ALL.iter().map(|f|serde_json::json!({"name":f.name(),"about":f.about(),"standing":self.standing_of(*f)})).collect::<Vec<_>>(),"keys_recovered":self.recovered(),"relay_restored":self.restored,"outcome":self.outcome,"discovered_records":facts,"visible_threats":threats,"known_archives":landmarks,"known_lift":self.lift,"known_relay":if self.discovered(self.relay){Some(self.relay)}else{None},"recent_events":self.events.iter().rev().take(16).collect::<Vec<_>>()})
+    }
+    /// Bring a save from an older schema up to date (missing fields default).
+    pub fn migrate(&mut self) {
+        if self.owned.is_empty() {
+            self.owned = self.loadout.clone();
+        }
+        for m in self.loadout.clone() {
+            if !self.owned.contains(&m) {
+                self.owned.push(m);
+            }
+        }
+        if self.records_found.is_empty() {
+            let found: Vec<usize> = self
+                .archives
+                .iter()
+                .filter(|a| a.recovered)
+                .map(|a| a.id)
+                .collect();
+            self.records_found = found;
+        }
+        let slots = self.slots();
+        self.loadout.truncate(slots);
     }
     pub fn validate(&self) -> Result<(), String> {
         let n = (WIDTH * HEIGHT) as usize;
@@ -794,10 +1096,11 @@ impl Game {
             return Err("Invalid player or landmark".into());
         }
         if self.hp < 0
-            || self.hp > 24
-            || self.medkits > 3
-            || self.energy > 6
-            || self.enemies.len() > 5
+            || self.hp > MAX_HP
+            || self.medkits > MAX_MEDKITS
+            || self.energy > START_ENERGY
+            || self.enemies.len() > 12
+            || self.floor >= FLOORS
             || self.archives.len() != 3
         {
             return Err("Invalid expedition values".into());
@@ -805,7 +1108,10 @@ impl Game {
         let mut ids = HashSet::new();
         let mut positions = HashSet::new();
         for a in &self.archives {
-            if a.id >= 3 || !ids.insert(a.id) || !self.floor(a.pos) {
+            if !(self.floor * 3..self.floor * 3 + 3).contains(&a.id)
+                || !ids.insert(a.id)
+                || !self.floor(a.pos)
+            {
                 return Err("Invalid archive".into());
             }
         }
@@ -814,7 +1120,7 @@ impl Game {
                 || e.pos == self.player
                 || !positions.insert(e.pos)
                 || e.hp <= 0
-                || e.hp > 8
+                || e.hp > 20
             {
                 return Err("Invalid sentinel".into());
             }
@@ -827,8 +1133,16 @@ impl Game {
         {
             return Err("Invalid history".into());
         }
-        if self.loadout.len() > Module::SLOTS
+        if self.loadout.len() > self.slots()
             || (1..self.loadout.len()).any(|i| self.loadout[..i].contains(&self.loadout[i]))
+            || self.owned.len() > Module::ALL.len()
+            || (1..self.owned.len()).any(|i| self.owned[..i].contains(&self.owned[i]))
+            || self.loadout.iter().any(|m| !self.owned.contains(m))
+            || self.records_found.iter().any(|&id| id >= RECORDS.len())
+            || (1..self.records_found.len())
+                .any(|i| self.records_found[..i].contains(&self.records_found[i]))
+            || self.caches.len() > 2
+            || self.caches.iter().any(|c| !self.floor(c.pos))
             || self.energy > START_ENERGY
             || self.actions.len() > MAX_ACTIONS
             || self.standing.iter().any(|s| s.abs() > 20)
@@ -854,20 +1168,26 @@ mod tests {
     #[test]
     fn generated_objectives_are_reachable() {
         for seed in 0..100 {
-            let g = Game::new(seed);
-            g.validate().unwrap();
-            let mut reached = HashSet::from([g.player]);
-            let mut q = VecDeque::from([g.player]);
-            while let Some(p) = q.pop_front() {
-                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    let n = p.offset(dx, dy);
-                    if g.floor(n) && reached.insert(n) {
-                        q.push_back(n);
+            let mut g = Game::new(seed);
+            for floor in 0..FLOORS {
+                g.build_floor(floor);
+                g.floor = floor;
+                g.validate().unwrap();
+                let mut reached = HashSet::from([g.player]);
+                let mut q = VecDeque::from([g.player]);
+                while let Some(p) = q.pop_front() {
+                    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                        let n = p.offset(dx, dy);
+                        if g.floor(n) && reached.insert(n) {
+                            q.push_back(n);
+                        }
                     }
                 }
+                assert!(reached.contains(&g.relay), "seed {seed} floor {floor}");
+                assert!(g.archives.iter().all(|a| reached.contains(&a.pos)));
+                assert!(g.caches.iter().all(|c| reached.contains(&c.pos)));
+                assert!(g.enemies.iter().all(|e| reached.contains(&e.pos)));
             }
-            assert!(reached.contains(&g.relay));
-            assert!(g.archives.iter().all(|a| reached.contains(&a.pos)));
         }
     }
     #[test]
@@ -908,18 +1228,134 @@ mod tests {
     #[test]
     fn exit_requires_records_and_relay() {
         let mut g = Game::new(9);
+        g.floor = FLOORS - 1;
+        g.build_floor(FLOORS - 1);
         g.interact();
         assert_eq!(g.outcome, Outcome::Exploring);
         g.enemies.clear();
         for a in &mut g.archives {
             a.recovered = true;
         }
+        g.player = g.lift;
+        g.interact();
+        assert_eq!(
+            g.outcome,
+            Outcome::Exploring,
+            "the lift needs the relay first"
+        );
         g.player = g.relay;
         g.interact();
         assert!(g.restored);
         g.player = g.lift;
         g.interact();
         assert_eq!(g.outcome, Outcome::Escaped);
+        g.validate().unwrap();
+    }
+    #[test]
+    fn the_lift_descends_and_carries_your_state_down() {
+        let mut g = Game::new_with(5, &[Module::Shield]);
+        g.enemies.clear();
+        g.hp = 10;
+        g.medkits = 3;
+        g.kills = 2;
+        g.standing = [2, -1];
+        let first_map = g.tiles.clone();
+        for i in 0..3 {
+            g.player = g.archives[i].pos;
+            g.interact();
+        }
+        g.player = g.relay;
+        g.interact();
+        g.player = g.lift;
+        g.interact();
+        assert_eq!((g.floor, g.outcome), (1, Outcome::Exploring));
+        assert_eq!((g.hp, g.medkits, g.energy), (18, 4, START_ENERGY));
+        assert_eq!((g.kills, g.standing.len()), (2, 2));
+        assert!(g.standing[0] >= 2, "faction standing carries over");
+        assert!(!g.restored && g.archives.iter().all(|a| !a.recovered));
+        assert_ne!(g.tiles, first_map, "a new floor is a new map");
+        assert_eq!(g.records_found.len(), 3, "records stay in the journal");
+        assert!(g.archives.iter().all(|a| (3..6).contains(&a.id)));
+        assert_eq!(g.slots(), 2);
+        g.validate().unwrap();
+    }
+    #[test]
+    fn foes_get_harder_with_depth() {
+        let mut kinds = vec![];
+        for floor in 0..FLOORS {
+            let mut g = Game::new(21);
+            g.build_floor(floor);
+            let count = |k| g.enemies.iter().filter(|e| e.kind == k).count();
+            kinds.push((
+                count(EnemyKind::Sentinel),
+                count(EnemyKind::Hunter),
+                count(EnemyKind::Overseer),
+                g.enemies[0].hp,
+            ));
+        }
+        assert_eq!(kinds[0], (5, 0, 0, 6));
+        assert_eq!(kinds[1], (4, 1, 0, 7));
+        assert_eq!(kinds[2], (3, 2, 1, 8));
+    }
+    #[test]
+    fn hunters_hit_harder_and_the_overseer_is_slow() {
+        let mut g = adjacent_sentinel(7, &[]);
+        g.enemies[0].kind = EnemyKind::Hunter;
+        g.wait();
+        assert_eq!(g.hp, MAX_HP - 2);
+        let mut o = adjacent_sentinel(7, &[]);
+        o.enemies.clear();
+        let start = o.player;
+        let far = start.offset(4, 0);
+        assert!(o.floor(far));
+        o.enemies.push(Enemy {
+            pos: far,
+            hp: 14,
+            kind: EnemyKind::Overseer,
+        });
+        let before = o.enemies[0].pos.distance(o.player);
+        o.wait();
+        o.wait();
+        let after = o.enemies[0].pos.distance(o.player);
+        assert_eq!(
+            before - after,
+            1,
+            "two turns, but it advances only every other one"
+        );
+    }
+    #[test]
+    fn caches_give_new_modules_and_slots_limit_what_is_fitted() {
+        let mut g = Game::new_with(5, &[Module::Shield]);
+        g.enemies.clear();
+        assert_eq!(g.caches.len(), 1);
+        let found = g.caches[0].module;
+        assert_ne!(found, Module::Shield, "a cache never repeats what you own");
+        g.player = g.caches[0].pos;
+        g.interact();
+        assert!(g.owned.contains(&found));
+        assert!(
+            !g.has(found),
+            "floor 1 has a single slot, so it is carried, not fitted"
+        );
+        g.fit(found);
+        assert!(!g.has(found), "no free slot until you unfit something");
+        g.unfit(Module::Shield);
+        g.fit(found);
+        assert!(g.has(found) && !g.has(Module::Shield));
+        assert!(g.owned.contains(&Module::Shield));
+        g.validate().unwrap();
+    }
+    #[test]
+    fn old_saves_migrate() {
+        let mut g = Game::new(3);
+        g.owned.clear();
+        g.records_found.clear();
+        g.archives[1].recovered = true;
+        g.loadout = vec![Module::Scanner, Module::Shield];
+        g.migrate();
+        assert_eq!(g.loadout, vec![Module::Scanner], "slots for floor 1 is 1");
+        assert!(g.owned.contains(&Module::Scanner) && g.owned.contains(&Module::Shield));
+        assert_eq!(g.records_found, vec![1]);
         g.validate().unwrap();
     }
     fn adjacent_sentinel(seed: u64, loadout: &[Module]) -> Game {
@@ -929,6 +1365,7 @@ mod tests {
         g.enemies.push(Enemy {
             pos: start.offset(1, 0),
             hp: 6,
+            kind: EnemyKind::Sentinel,
         });
         g
     }
@@ -1024,6 +1461,8 @@ mod tests {
     #[test]
     fn summary_ranks_the_run() {
         let mut g = Game::new(3);
+        g.floor = FLOORS - 1;
+        g.build_floor(FLOORS - 1);
         g.enemies.clear();
         for a in &mut g.archives {
             a.recovered = true;
@@ -1033,7 +1472,7 @@ mod tests {
         g.player = g.lift;
         g.interact();
         assert_eq!(g.summary().rank, "Silent Signal");
-        g.kills = 4;
+        g.kills = 10;
         assert_eq!(g.summary().rank, "Custodian's Bane");
     }
     #[test]
