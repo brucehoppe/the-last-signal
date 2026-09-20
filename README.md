@@ -40,7 +40,7 @@ On Windows, use `run.cmd` after installing the prerequisites in START-HERE.
 
 ## Browser demo
 
-The same Rust game compiles to WebAssembly (`cargo build --release --target wasm32-unknown-unknown`, then serve `web/` with the `.wasm` beside `index.html`). On wasm, `ureq`, `tempfile` and disk saves are excluded, and ECHO answers from a rule-based script that reads only the discovered-state snapshot. GitHub Actions builds and publishes it on every push to `main`. `web/mq_js_bundle.js` is macroquad's JS loader (MIT/Apache-2.0).
+The same Rust game compiles to WebAssembly (`cargo build --release --target wasm32-unknown-unknown`, then serve `web/` with the `.wasm` beside `index.html`). On wasm, `ureq`, `tempfile` and disk saves are excluded, and ECHO answers from a rule-based script that reads only the discovered-state snapshot. GitHub Actions builds and publishes it on every push to `main`. `web/gl.js` is miniquad's JS loader, the same version as the crate in `Cargo.lock` (MIT/Apache-2.0).
 
 ## Local AI
 
