@@ -6,8 +6,9 @@ use std::{
 use the_last_signal::{
     ai,
     core::{
-        EnemyKind, Faction, Game, Module, Outcome, PickupKind, Pos, TerminalState, Tile,
-        ANALYZE_COST, CHALLENGES, FLOORS, FLOOR_NAMES, HEIGHT, RECORD_AUTHORS, SCAN_COST, WIDTH,
+        Awareness, EnemyKind, Faction, Game, Module, Outcome, PickupKind, Pos, TerminalState, Tile,
+        ANALYZE_COST, CHALLENGES, FLOORS, FLOOR_NAMES, HEIGHT, PULSE_COST, RECORD_AUTHORS,
+        SCAN_COST, WIDTH,
     },
     save,
 };
@@ -358,6 +359,26 @@ fn draw_map(g: &Game, route: &[Pos]) {
             },
         );
     }
+    for e in g.enemies.iter().filter(|e| g.can_see(e.pos)) {
+        let (mark, color) = if e.stun > 0 {
+            ("z", TEAL)
+        } else if e.passive {
+            ("-", MUTED)
+        } else {
+            match e.awareness {
+                Awareness::Alert => ("!", CORAL),
+                Awareness::Searching => ("?", AMBER),
+                Awareness::Idle => ("", MUTED),
+            }
+        };
+        text(
+            mark,
+            41. + e.pos.x as f32 * 19.,
+            118. + e.pos.y as f32 * 19.,
+            12.,
+            color,
+        );
+    }
     let px = 37. + g.player.x as f32 * 19.;
     let py = 118. + g.player.y as f32 * 19.;
     draw_circle(px, py, 7., TEAL);
@@ -554,6 +575,9 @@ async fn main() {
                         format!("ANALYZE [G] -{ANALYZE_COST}"),
                         g.energy >= ANALYZE_COST,
                     ),
+                    Module::Pulse => {
+                        chip(format!("PULSE [Q] -{PULSE_COST}"), g.energy >= PULSE_COST)
+                    }
                 }
             }
         }
@@ -589,7 +613,7 @@ async fn main() {
         match g.hint() {
             Some(h) => text(&format!("> {h}"), 28., 788., 16., AMBER),
             None => text(
-                "WASD move  E interact  H heal  F scan  G analyze  I equip  SPACE wait  J journal",
+                "WASD move  E interact  H heal  F scan  G analyze  Q pulse  I equip  SPACE wait  J journal",
                 28.,
                 788.,
                 15.,
@@ -756,6 +780,8 @@ async fn main() {
                     g.scan();
                 } else if is_key_pressed(KeyCode::G) {
                     g.analyze();
+                } else if is_key_pressed(KeyCode::Q) {
+                    g.pulse();
                 } else if is_key_pressed(KeyCode::Space) {
                     g.wait();
                 }
@@ -1137,14 +1163,15 @@ async fn main() {
                         3,
                     );
                     for (i, m) in Module::ALL.iter().enumerate() {
-                        let y = 300. + i as f32 * 80.;
+                        let y = 290. + i as f32 * 74.;
                         let chosen = loadout.contains(m);
-                        let hit =
-                            button(
-                                if chosen { "CHOSEN" } else { "CHOOSE" },
-                                Rect::new(217., y, 130., 42.),
-                                true,
-                            ) || is_key_pressed([KeyCode::Key1, KeyCode::Key2, KeyCode::Key3][i]);
+                        let hit = button(
+                            if chosen { "CHOSEN" } else { "CHOOSE" },
+                            Rect::new(217., y, 130., 42.),
+                            true,
+                        ) || is_key_pressed(
+                            [KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4][i],
+                        );
                         text(
                             &format!("{}  [{}]  {}", i + 1, m.key_hint(), m.name()),
                             370.,
@@ -1179,7 +1206,7 @@ async fn main() {
                         TEAL,
                     );
                     for (i, m) in Module::ALL.iter().enumerate() {
-                        let y = 285. + i as f32 * 80.;
+                        let y = 262. + i as f32 * 68.;
                         let owned = g.owned.contains(m);
                         let fitted = g.has(*m);
                         if owned {
@@ -1188,7 +1215,7 @@ async fn main() {
                                 Rect::new(217., y, 130., 42.),
                                 g.outcome == Outcome::Exploring,
                             ) || is_key_pressed(
-                                [KeyCode::Key1, KeyCode::Key2, KeyCode::Key3][i],
+                                [KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4][i],
                             );
                             if hit {
                                 if fitted {
@@ -1216,7 +1243,7 @@ async fn main() {
                         text(m.effect(), 370., y + 42., 16., MUTED);
                     }
                     if let Some(e) = g.events.last() {
-                        wrapped(&e.text, 217., 545., 96, 16., AMBER, 1);
+                        wrapped(&e.text, 217., 562., 96, 16., AMBER, 1);
                     }
                     if button("DONE / ESC", Rect::new(217., 603., 200., 40.), true)
                         || is_key_pressed(KeyCode::Escape)

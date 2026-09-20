@@ -134,7 +134,7 @@ impl EnemyKind {
             _ => 2,
         }
     }
-    /// How far it notices you.
+    /// How far an alert one sees you. At its post it notices you 2 tiles later.
     pub fn sight(self) -> i32 {
         match self {
             EnemyKind::Sentinel => 7,
@@ -144,8 +144,8 @@ impl EnemyKind {
     pub fn max_hp(self, floor: usize) -> i32 {
         match self {
             EnemyKind::Sentinel => 6 + floor as i32,
-            EnemyKind::Hunter => 5 + floor as i32,
-            EnemyKind::Overseer => 12,
+            EnemyKind::Hunter => 6 + floor as i32,
+            EnemyKind::Overseer => 16,
         }
     }
     /// The Overseer is heavy: it closes in only every other turn (it still strikes every turn).
@@ -153,12 +153,60 @@ impl EnemyKind {
         self != EnemyKind::Overseer || turn.is_multiple_of(2)
     }
 }
+/// What a foe currently believes about you.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Awareness {
+    /// At its post (or walking back to it). Notices you only from close by.
+    #[default]
+    Idle,
+    /// It knows where you are, or where you were a moment ago.
+    Alert,
+    /// It reached the place it last saw you and found nothing.
+    Searching,
+}
+/// Sentinels hold their posts: they will not chase farther than this from them.
+pub const SENTINEL_LEASH: i32 = 12;
+/// A foe that notices you alerts every unit within this many tiles of it.
+pub const SIGNAL_RANGE: i32 = 8;
+/// A strike on a foe that is not alert to you (or is stunned) does this instead of 3.
+pub const AMBUSH_DAMAGE: i32 = 6;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Enemy {
     pub pos: Pos,
     pub hp: i32,
     #[serde(default)]
     pub kind: EnemyKind,
+    /// The post it guards and returns to. `None` only in saves from before posts.
+    #[serde(default)]
+    pub home: Option<Pos>,
+    #[serde(default)]
+    pub awareness: Awareness,
+    #[serde(default)]
+    pub last_seen: Option<Pos>,
+    /// Turns left of searching, or (for a hunter) of tracking you out of sight.
+    #[serde(default)]
+    pub patience: u32,
+    /// Turns it will spend stunned.
+    #[serde(default)]
+    pub stun: u32,
+    /// Stood down by the Custodians: it ignores you unless you strike it.
+    #[serde(default)]
+    pub passive: bool,
+}
+impl Enemy {
+    pub fn new(pos: Pos, kind: EnemyKind, hp: i32) -> Self {
+        Self {
+            pos,
+            hp,
+            kind,
+            home: Some(pos),
+            awareness: Awareness::Idle,
+            last_seen: None,
+            patience: 0,
+            stun: 0,
+            passive: false,
+        }
+    }
 }
 /// Equipment lying in the complex: a module you can take with E.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -202,6 +250,8 @@ pub const MAX_ENERGY: u32 = 8;
 pub const CELL_POWER: u32 = 2;
 pub const SCAN_COST: u32 = 1;
 pub const ANALYZE_COST: u32 = 2;
+pub const PULSE_COST: u32 = 2;
+pub const PULSE_RANGE: i32 = 3;
 pub const MAX_ACTIONS: usize = 20_000;
 /// Fitted power modules. All of them draw on one shared power pool, so every
 /// module you fit is a decision about what to spend it on.
@@ -210,9 +260,15 @@ pub enum Module {
     Scanner,
     Shield,
     Analyzer,
+    Pulse,
 }
 impl Module {
-    pub const ALL: [Module; 3] = [Module::Scanner, Module::Shield, Module::Analyzer];
+    pub const ALL: [Module; 4] = [
+        Module::Scanner,
+        Module::Shield,
+        Module::Analyzer,
+        Module::Pulse,
+    ];
     /// Slots open up as you descend: one per floor, up to this many.
     pub const MAX_SLOTS: usize = 3;
     pub fn name(self) -> &'static str {
@@ -220,6 +276,7 @@ impl Module {
             Module::Scanner => "Scanner Array",
             Module::Shield => "Shield Cell",
             Module::Analyzer => "Field Analyzer",
+            Module::Pulse => "Pulse Emitter",
         }
     }
     pub fn key_hint(self) -> &'static str {
@@ -227,6 +284,7 @@ impl Module {
             Module::Scanner => "F",
             Module::Shield => "auto",
             Module::Analyzer => "G",
+            Module::Pulse => "Q",
         }
     }
     pub fn effect(self) -> &'static str {
@@ -235,6 +293,9 @@ impl Module {
             Module::Shield => "Absorbs a sentinel strike. Costs 1 power per hit absorbed.",
             Module::Analyzer => {
                 "Pinpoints the nearest unrecovered archive through walls. Costs 2 power."
+            }
+            Module::Pulse => {
+                "Stuns every foe in sight within 3 tiles for 2 turns; stunned foes take 6. Costs 2 power."
             }
         }
     }
@@ -286,6 +347,7 @@ pub enum Action {
     Heal,
     Scan,
     Analyze,
+    Pulse,
     Interact,
     Fit(Module),
     Unfit(Module),
@@ -502,32 +564,32 @@ impl Game {
         let mut posts: Vec<usize> = others[..3].to_vec();
         posts.insert(0, spare_room);
         for &room in posts.iter().skip(floor) {
-            self.enemies.push(Enemy {
-                pos: centers[room].offset(2, 1),
-                hp: EnemyKind::Sentinel.max_hp(floor),
-                kind: EnemyKind::Sentinel,
-            });
+            self.enemies.push(Enemy::new(
+                centers[room].offset(2, 1),
+                EnemyKind::Sentinel,
+                EnemyKind::Sentinel.max_hp(floor),
+            ));
         }
-        self.enemies.push(Enemy {
-            pos: centers[relay_room].offset(2, 1),
-            hp: EnemyKind::Sentinel.max_hp(floor) + 2,
-            kind: EnemyKind::Sentinel,
-        });
+        self.enemies.push(Enemy::new(
+            centers[relay_room].offset(2, 1),
+            EnemyKind::Sentinel,
+            EnemyKind::Sentinel.max_hp(floor) + 2,
+        ));
         // Hunters join from floor 2: one more on each deeper floor.
         for h in 0..floor {
-            self.enemies.push(Enemy {
-                pos: centers[others[h]].offset(-2, -1),
-                hp: EnemyKind::Hunter.max_hp(floor),
-                kind: EnemyKind::Hunter,
-            });
+            self.enemies.push(Enemy::new(
+                centers[others[h]].offset(-2, -1),
+                EnemyKind::Hunter,
+                EnemyKind::Hunter.max_hp(floor),
+            ));
         }
         // The Overseer guards the final relay.
         if floor == FLOORS - 1 {
-            self.enemies.push(Enemy {
-                pos: centers[relay_room].offset(-2, 1),
-                hp: EnemyKind::Overseer.max_hp(floor),
-                kind: EnemyKind::Overseer,
-            });
+            self.enemies.push(Enemy::new(
+                centers[relay_room].offset(-2, 1),
+                EnemyKind::Overseer,
+                EnemyKind::Overseer.max_hp(floor),
+            ));
         }
         // One cache per floor, always holding a module you do not have yet.
         let missing: Vec<Module> = Module::ALL
@@ -708,6 +770,7 @@ impl Game {
             Action::Heal => self.heal(),
             Action::Scan => self.scan(),
             Action::Analyze => self.analyze(),
+            Action::Pulse => self.pulse(),
             Action::Interact => self.interact(),
             Action::Fit(m) => self.fit(m),
             Action::Unfit(m) => self.unfit(m),
@@ -770,12 +833,39 @@ impl Game {
         }
         self.record(Action::Move(dx, dy));
         if let Some(i) = self.enemies.iter().position(|e| e.pos == next) {
-            self.enemies[i].hp -= 3;
-            self.log("combat", "You hit a sentinel for 3 damage.");
-            if self.enemies[i].hp <= 0 {
+            if self.enemies[i].passive {
+                for e in &mut self.enemies {
+                    e.passive = false;
+                }
+                self.raise_alarm();
+                self.log(
+                    "betrayal",
+                    "You struck a unit that had stood down. The truce on this floor is over.",
+                );
+                self.shift_standing(Faction::Custodians, -2);
+            }
+            let e = &mut self.enemies[i];
+            let ambush = e.awareness != Awareness::Alert || e.stun > 0;
+            let damage = if ambush { AMBUSH_DAMAGE } else { 3 };
+            e.hp -= damage;
+            e.awareness = Awareness::Alert;
+            e.last_seen = Some(self.player);
+            let (name, dead) = (e.kind.name(), e.hp <= 0);
+            self.log(
+                "combat",
+                &if ambush {
+                    format!(
+                        "Ambush! You hit the unready {} for {damage}.",
+                        name.to_lowercase()
+                    )
+                } else {
+                    format!("You hit the {} for {damage}.", name.to_lowercase())
+                },
+            );
+            if dead {
                 self.enemies.remove(i);
                 self.kills += 1;
-                self.log("combat", "Sentinel disabled.");
+                self.log("combat", &format!("{name} disabled."));
                 self.shift_standing(Faction::Custodians, -1);
             }
         } else {
@@ -912,6 +1002,37 @@ impl Game {
         );
         self.finish_turn();
     }
+    /// Stun every foe in sight within `PULSE_RANGE`. They lose this turn and the
+    /// next two, and a stunned foe takes ambush damage.
+    pub fn pulse(&mut self) {
+        if self.outcome != Outcome::Exploring {
+            return;
+        }
+        if !self.has(Module::Pulse) {
+            self.log("status", "No Pulse Emitter fitted. Open Equipment (I).");
+            return;
+        }
+        if self.energy < PULSE_COST {
+            self.log("status", "Not enough power for a pulse (needs 2).");
+            return;
+        }
+        self.record(Action::Pulse);
+        self.energy -= PULSE_COST;
+        let at = self.player;
+        let mut hit = 0;
+        for i in 0..self.enemies.len() {
+            let p = self.enemies[i].pos;
+            if p.distance(at) <= PULSE_RANGE && self.line_clear(at, p) {
+                self.enemies[i].stun = 3;
+                hit += 1;
+            }
+        }
+        self.log(
+            "pulse",
+            &format!("Pulse Emitter fired: {hit} foe(s) stunned for 2 turns. Walk past, or strike for 6."),
+        );
+        self.finish_turn();
+    }
     /// Fit an owned module into a free slot. Takes a turn.
     pub fn fit(&mut self, m: Module) {
         if self.outcome != Outcome::Exploring {
@@ -984,9 +1105,8 @@ impl Game {
                 "echo",
                 "ECHO: I can reconstruct that record. Ask me what it says.",
             );
-            if RECORD_AUTHORS[id] == Faction::Wardens {
-                self.shift_standing(Faction::Wardens, 1);
-            }
+            // Reading a faction's own words earns a little of its trust.
+            self.shift_standing(RECORD_AUTHORS[id], 1);
             self.finish_turn();
             return;
         }
@@ -1038,6 +1158,7 @@ impl Game {
                 self.log("relay", "Relay restored. Return to the lift.");
                 self.shift_standing(Faction::Wardens, 1);
                 self.shift_standing(Faction::Custodians, 1);
+                self.custodian_response();
                 self.finish_turn();
             } else if !self.restored {
                 self.log("status", "Relay needs three recovered archive keys.");
@@ -1100,8 +1221,9 @@ impl Game {
             self.energy = self.energy.saturating_sub(2);
             self.log(
                 "terminal",
-                "Terminal: response rejected. It drains 2 power and locks.",
+                "Terminal: response rejected. It drains 2 power, locks, and alerts the floor.",
             );
+            self.raise_alarm();
             self.shift_standing(Faction::Custodians, -1);
         }
         self.finish_turn();
@@ -1135,52 +1257,198 @@ impl Game {
             damaged(RECORDS[id])
         }
     }
+    /// Steps from `target` to every floor tile (`u16::MAX` where unreachable).
+    fn distances_from(&self, target: Pos) -> Vec<u16> {
+        let mut dist = vec![u16::MAX; (WIDTH * HEIGHT) as usize];
+        let Some(t) = Self::index(target) else {
+            return dist;
+        };
+        dist[t] = 0;
+        let mut queue = std::collections::VecDeque::from([target]);
+        while let Some(p) = queue.pop_front() {
+            let d = dist[Self::index(p).unwrap()];
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let n = p.offset(dx, dy);
+                if self.floor(n) {
+                    let i = Self::index(n).unwrap();
+                    if dist[i] == u16::MAX {
+                        dist[i] = d + 1;
+                        queue.push_back(n);
+                    }
+                }
+            }
+        }
+        dist
+    }
+    /// Move foe `i` one tile along the shortest way to `target`, round corners
+    /// and all, if a free tile gets it closer.
+    fn advance(&mut self, i: usize, target: Pos) {
+        let dist = self.distances_from(target);
+        let p = self.enemies[i].pos;
+        let here = dist[Self::index(p).unwrap()];
+        let leash = (self.enemies[i].kind == EnemyKind::Sentinel)
+            .then_some(self.enemies[i].home)
+            .flatten();
+        let best = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+            .into_iter()
+            .map(|(dx, dy)| p.offset(dx, dy))
+            .filter(|q| {
+                self.floor(*q)
+                    && *q != self.player
+                    && !self.enemies.iter().any(|e| e.pos == *q)
+                    && leash.is_none_or(|h| q.distance(h) <= SENTINEL_LEASH)
+            })
+            .min_by_key(|q| dist[Self::index(*q).unwrap()]);
+        if let Some(q) = best.filter(|q| dist[Self::index(*q).unwrap()] < here) {
+            self.enemies[i].pos = q;
+        }
+    }
+    /// The Custodians answer a restored relay according to how you have treated
+    /// them: their units stand down, or the floor locks down and a hunter is
+    /// sent to hold the lift.
+    fn custodian_response(&mut self) {
+        if self.standing_of(Faction::Custodians) >= 0 {
+            for e in &mut self.enemies {
+                e.passive = true;
+                e.awareness = Awareness::Idle;
+            }
+            if !self.enemies.is_empty() {
+                self.log(
+                    "standdown",
+                    "The Custodians accept the relay: their units on this floor stand down. Leave them be.",
+                );
+            }
+            return;
+        }
+        // One hunter, two on the last floor.
+        for _ in 0..1 + self.floor / 2 {
+            let spot = [(2, 0), (-2, 0), (0, 2), (0, -2), (1, 1), (-1, -1)]
+                .into_iter()
+                .map(|(dx, dy)| self.lift.offset(dx, dy))
+                .find(|q| {
+                    self.floor(*q) && *q != self.player && !self.enemies.iter().any(|e| e.pos == *q)
+                });
+            let Some(q) = spot else { break };
+            let mut hunter = Enemy::new(q, EnemyKind::Hunter, EnemyKind::Hunter.max_hp(self.floor));
+            hunter.awareness = Awareness::Alert;
+            hunter.last_seen = Some(self.player);
+            self.enemies.push(hunter);
+        }
+        self.raise_alarm();
+        self.log(
+            "lockdown",
+            "Lockdown! The Custodians distrust you: every unit is alerted and hunters deploy at the lift.",
+        );
+    }
+    /// Every foe on the floor learns where you are.
+    fn raise_alarm(&mut self) {
+        let at = self.player;
+        for e in &mut self.enemies {
+            e.awareness = Awareness::Alert;
+            e.last_seen = Some(at);
+        }
+    }
     fn finish_turn(&mut self) {
         self.turn += 1;
         for i in 0..self.enemies.len() {
-            let (p, kind) = (self.enemies[i].pos, self.enemies[i].kind);
-            if p.distance(self.player) == 1 {
-                let who = kind.name().to_lowercase();
-                if self.has(Module::Shield) && self.energy > 0 {
-                    self.energy -= 1;
+            if self.enemies[i].stun > 0 {
+                self.enemies[i].stun -= 1;
+                continue;
+            }
+            if self.enemies[i].passive {
+                continue;
+            }
+            let (p, kind, awareness) = (
+                self.enemies[i].pos,
+                self.enemies[i].kind,
+                self.enemies[i].awareness,
+            );
+            let who = kind.name().to_lowercase();
+            let reach = if awareness == Awareness::Alert {
+                kind.sight()
+            } else {
+                kind.sight() - 2
+            };
+            let sees = p.distance(self.player) <= reach && self.line_clear(p, self.player);
+            if sees {
+                self.enemies[i].last_seen = Some(self.player);
+                self.enemies[i].patience = if kind == EnemyKind::Hunter { 3 } else { 0 };
+                if awareness != Awareness::Alert {
+                    // Noticing you takes its turn: that is your opening.
+                    self.enemies[i].awareness = Awareness::Alert;
                     self.log(
-                        "shield",
-                        &format!("Shield Cell absorbed a {who} strike (-1 power)."),
+                        "alert",
+                        &format!("A {who} notices you and signals nearby units."),
                     );
+                    let at = self.player;
+                    for e in &mut self.enemies {
+                        if !e.passive && e.pos.distance(p) <= SIGNAL_RANGE {
+                            e.awareness = Awareness::Alert;
+                            e.last_seen.get_or_insert(at);
+                        }
+                    }
                     continue;
                 }
-                self.hp -= kind.damage();
-                self.log(
-                    "damage",
-                    &format!("A {who} strikes you for {} damage.", kind.damage()),
-                );
-                if self.hp <= 0 {
-                    self.hp = 0;
-                    self.outcome = Outcome::Dead;
+                if p.distance(self.player) == 1 {
+                    if self.has(Module::Shield) && self.energy > 0 {
+                        self.energy -= 1;
+                        self.log(
+                            "shield",
+                            &format!("Shield Cell absorbed a {who} strike (-1 power)."),
+                        );
+                        continue;
+                    }
+                    self.hp -= kind.damage();
                     self.log(
-                        "death",
-                        "Expedition lost. Start a new signal or reload your save.",
+                        "damage",
+                        &format!("A {who} strikes you for {} damage.", kind.damage()),
                     );
-                    break;
+                    if self.hp <= 0 {
+                        self.hp = 0;
+                        self.outcome = Outcome::Dead;
+                        self.log(
+                            "death",
+                            "Expedition lost. Start a new signal or reload your save.",
+                        );
+                        break;
+                    }
+                } else if kind.advances(self.turn) {
+                    self.advance(i, self.player);
                 }
-            } else if kind.advances(self.turn)
-                && p.distance(self.player) <= kind.sight()
-                && self.line_clear(p, self.player)
-            {
-                let mut choices = [
-                    p.offset(1, 0),
-                    p.offset(-1, 0),
-                    p.offset(0, 1),
-                    p.offset(0, -1),
-                ];
-                choices.sort_by_key(|q| q.distance(self.player));
-                if let Some(q) = choices.into_iter().find(|q| {
-                    q.distance(self.player) < p.distance(self.player)
-                        && self.floor(*q)
-                        && *q != self.player
-                        && !self.enemies.iter().any(|e| e.pos == *q)
-                }) {
-                    self.enemies[i].pos = q;
+                continue;
+            }
+            match awareness {
+                Awareness::Alert => {
+                    // Hunters keep your trail for a few turns after losing sight.
+                    if self.enemies[i].patience > 0 {
+                        self.enemies[i].patience -= 1;
+                        self.enemies[i].last_seen = Some(self.player);
+                    }
+                    let goal = self.enemies[i].last_seen.unwrap_or(p);
+                    if kind.advances(self.turn) {
+                        self.advance(i, goal);
+                    }
+                    if self.enemies[i].pos == goal
+                        || self.enemies[i].pos == p && kind.advances(self.turn)
+                    {
+                        self.enemies[i].awareness = Awareness::Searching;
+                        self.enemies[i].patience = 3;
+                    }
+                }
+                Awareness::Searching => {
+                    if self.enemies[i].patience > 0 {
+                        self.enemies[i].patience -= 1;
+                    } else {
+                        self.enemies[i].awareness = Awareness::Idle;
+                        self.enemies[i].last_seen = None;
+                    }
+                }
+                Awareness::Idle => {
+                    if let Some(home) = self.enemies[i].home.filter(|h| *h != p) {
+                        if kind.advances(self.turn) {
+                            self.advance(i, home);
+                        }
+                    }
                 }
             }
         }
@@ -1230,7 +1498,7 @@ impl Game {
             .any(|e| e.pos.distance(self.player) == 1)
         {
             return Some(
-                "A foe is adjacent: bump into it to strike for 3. Sentinels hit for 1, Hunters and Overseers for 2.",
+                "Foe adjacent: bump it to strike for 3, or 6 if it has not noticed you. Sentinels hit for 1, others for 2.",
             );
         }
         if self.hp <= 10 && self.medkits > 0 {
@@ -1238,7 +1506,7 @@ impl Game {
         }
         if self.enemies.iter().any(|e| self.can_see(e.pos)) {
             return Some(
-                "Foe in sight (S sentinel, H hunter, O overseer). Fight in a corridor and strike first.",
+                "Foe in sight. Break line of sight and it loses you; wait round a corner and your first strike does 6.",
             );
         }
         if self
@@ -1332,7 +1600,7 @@ impl Game {
             .enemies
             .iter()
             .filter(|e| self.can_see(e.pos))
-            .map(|e| serde_json::json!({"position":e.pos,"hp":e.hp,"type":e.kind.name().to_lowercase()}))
+            .map(|e| serde_json::json!({"position":e.pos,"hp":e.hp,"type":e.kind.name().to_lowercase(),"awareness":e.awareness,"stood_down":e.passive,"stunned_turns":e.stun,"your_next_hit_does":if e.awareness!=Awareness::Alert||e.stun>0{AMBUSH_DAMAGE}else{3}}))
             .collect();
         let landmarks: Vec<_> = self
             .archives
@@ -1380,6 +1648,9 @@ impl Game {
         }
         let slots = self.slots();
         self.loadout.truncate(slots);
+        for e in &mut self.enemies {
+            e.home.get_or_insert(e.pos);
+        }
     }
     pub fn validate(&self) -> Result<(), String> {
         let n = (WIDTH * HEIGHT) as usize;
@@ -1608,11 +1879,7 @@ mod tests {
         let start = o.player;
         let far = start.offset(4, 0);
         assert!(o.floor(far));
-        o.enemies.push(Enemy {
-            pos: far,
-            hp: 14,
-            kind: EnemyKind::Overseer,
-        });
+        o.enemies.push(Enemy::new(far, EnemyKind::Overseer, 14));
         let before = o.enemies[0].pos.distance(o.player);
         o.wait();
         o.wait();
@@ -1662,11 +1929,9 @@ mod tests {
         let mut g = Game::new_with(seed, loadout);
         g.enemies.clear();
         let start = g.player;
-        g.enemies.push(Enemy {
-            pos: start.offset(1, 0),
-            hp: 6,
-            kind: EnemyKind::Sentinel,
-        });
+        g.enemies
+            .push(Enemy::new(start.offset(1, 0), EnemyKind::Sentinel, 6));
+        g.enemies[0].awareness = Awareness::Alert;
         g
     }
     #[test]
@@ -1818,6 +2083,84 @@ mod tests {
         // The challenge reaches ECHO, the answer key does not.
         let k = w.knowledge().to_string();
         assert!(k.contains("evacuation destination") && !k.contains("\"answer\""));
+    }
+    #[test]
+    fn a_foe_that_loses_you_searches_then_walks_back_to_its_post() {
+        let mut g = adjacent_sentinel(7, &[]);
+        let post = g.enemies[0].pos;
+        g.enemies[0].last_seen = Some(g.player.offset(-2, 0));
+        g.player = g.relay; // out of sight, rooms away
+        g.wait();
+        assert_ne!(g.enemies[0].pos, post, "it heads for where it last saw you");
+        for _ in 0..12 {
+            g.wait();
+        }
+        assert_eq!(g.enemies[0].awareness, Awareness::Idle);
+        assert_eq!(g.enemies[0].pos, post);
+        assert_eq!(g.hp, MAX_HP);
+    }
+    #[test]
+    fn striking_an_unready_foe_is_an_ambush() {
+        let mut g = adjacent_sentinel(7, &[]);
+        g.enemies[0].awareness = Awareness::Searching;
+        g.enemies[0].hp = 12;
+        g.step(1, 0);
+        assert_eq!(g.enemies[0].hp, 12 - AMBUSH_DAMAGE);
+        assert_eq!(g.enemies[0].awareness, Awareness::Alert);
+        g.step(1, 0);
+        assert_eq!(g.enemies[0].hp, 12 - AMBUSH_DAMAGE - 3);
+    }
+    #[test]
+    fn a_pulse_stuns_what_it_can_see() {
+        let mut g = adjacent_sentinel(7, &[Module::Pulse]);
+        g.enemies[0].hp = 20;
+        g.pulse();
+        g.wait();
+        g.wait();
+        assert_eq!((g.hp, g.energy), (MAX_HP, START_ENERGY - PULSE_COST));
+        g.wait();
+        assert_eq!(g.hp, MAX_HP - 1, "the stun wears off");
+        g.pulse();
+        g.step(1, 0);
+        assert_eq!(g.enemies[0].hp, 20 - AMBUSH_DAMAGE);
+    }
+    fn at_the_relay_with_all_keys(standing: i32) -> Game {
+        let mut g = Game::new(5);
+        for a in &mut g.archives {
+            a.recovered = true;
+        }
+        g.standing[1] = standing;
+        g.player = g.relay.offset(-1, 0);
+        g
+    }
+    #[test]
+    fn trusted_operators_get_a_truce_and_can_break_it() {
+        let mut g = at_the_relay_with_all_keys(0);
+        let before = g.enemies.len();
+        g.interact();
+        assert!(g.restored && g.enemies.len() == before);
+        assert!(g.enemies.iter().all(|e| e.passive));
+        let foe = g.enemies[0].pos;
+        g.player = foe.offset(-1, 0);
+        g.wait();
+        g.wait();
+        assert_eq!(g.hp, MAX_HP, "stood-down units leave you alone");
+        let trust = g.standing_of(Faction::Custodians);
+        g.step(1, 0);
+        assert!(g.enemies.iter().all(|e| !e.passive));
+        assert!(g.standing_of(Faction::Custodians) <= trust - 2);
+    }
+    #[test]
+    fn distrusted_operators_get_a_lockdown() {
+        let mut g = at_the_relay_with_all_keys(-4);
+        let before = g.enemies.len();
+        g.interact();
+        assert_eq!(g.enemies.len(), before + 1);
+        let hunter = g.enemies.last().unwrap();
+        assert_eq!(hunter.kind, EnemyKind::Hunter);
+        assert!(hunter.pos.distance(g.lift) <= 3, "deployed at the lift");
+        assert!(g.enemies.iter().all(|e| e.awareness == Awareness::Alert));
+        g.validate().unwrap();
     }
     #[test]
     fn invalid_loadouts_are_rejected() {
