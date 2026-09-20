@@ -1,0 +1,11 @@
+# Build output
+target/
+# Local configuration and saves; never commit these
+config.json
+*.save.json
+.env
+.env.*
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

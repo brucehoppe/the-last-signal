@@ -1,0 +1,5 @@
+{
+  "model": "qwen3:4b",
+  "port": 11434,
+  "timeout_seconds": 90
+}
