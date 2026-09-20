@@ -1,5 +1,7 @@
 # The Last Signal
 
+![The Last Signal: exploring the Surface Complex with ECHO, the local AI companion](docs/screenshot.png)
+
 **[Try it in your browser](https://brucehoppe.github.io/the-last-signal/)**: a WebAssembly build of the real game. ECHO is a built-in script there and saving is off; the desktop build talks to a real local model through Ollama.
 
 An original Rust expedition roguelike with an optional local-LLM companion.
