@@ -6,8 +6,8 @@ use std::{
 use the_last_signal::{
     ai,
     core::{
-        EnemyKind, Faction, Game, Module, Outcome, Pos, Tile, ANALYZE_COST, FLOORS, FLOOR_NAMES,
-        HEIGHT, RECORDS, RECORD_AUTHORS, SCAN_COST, WIDTH,
+        EnemyKind, Faction, Game, Module, Outcome, PickupKind, Pos, Tile, ANALYZE_COST, FLOORS,
+        FLOOR_NAMES, HEIGHT, RECORDS, RECORD_AUTHORS, SCAN_COST, WIDTH,
     },
     save,
 };
@@ -218,6 +218,19 @@ fn draw_map(g: &Game) {
             TEAL,
         );
     }
+    for p in g.pickups.iter().filter(|p| !p.taken && g.discovered(p.pos)) {
+        let (glyph, color) = match p.kind {
+            PickupKind::PowerCell => ("*", AMBER),
+            PickupKind::Medkit => ("+", Color::new(0.55, 0.9, 0.5, 1.)),
+        };
+        text(
+            glyph,
+            31. + p.pos.x as f32 * 19.,
+            124. + p.pos.y as f32 * 19.,
+            19.,
+            color,
+        );
+    }
     for e in g.enemies.iter().filter(|e| g.can_see(e.pos)) {
         text(
             e.kind.glyph(),
@@ -419,7 +432,7 @@ async fn main() {
         draw_map(&g);
         map_sum += get_time() - map_t;
         text(
-            "YOU  o    ARCHIVE  A    RELAY  R    LIFT  L    CACHE  C    FOE  S H O",
+            "ARCHIVE A   RELAY R   LIFT L   CACHE C   POWER *   MEDKIT +   FOE S H O",
             28.,
             672.,
             17.,

@@ -112,7 +112,22 @@ pub struct Archive {
     pub id: usize,
     pub recovered: bool,
 }
+/// Supplies lying on the floor: walk over one to take it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PickupKind {
+    PowerCell,
+    Medkit,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Pickup {
+    pub pos: Pos,
+    pub kind: PickupKind,
+    pub taken: bool,
+}
 pub const START_ENERGY: u32 = 6;
+/// Power cells can charge you past the starting level, up to this.
+pub const MAX_ENERGY: u32 = 8;
+pub const CELL_POWER: u32 = 2;
 pub const SCAN_COST: u32 = 1;
 pub const ANALYZE_COST: u32 = 2;
 pub const MAX_ACTIONS: usize = 20_000;
@@ -270,6 +285,8 @@ pub struct Game {
     pub records_found: Vec<usize>,
     #[serde(default)]
     pub caches: Vec<Cache>,
+    #[serde(default)]
+    pub pickups: Vec<Pickup>,
 }
 struct Rng(u64);
 impl Rng {
@@ -322,6 +339,7 @@ impl Game {
             floor: 0,
             records_found: vec![],
             caches: vec![],
+            pickups: vec![],
         };
         g.build_floor(0);
         g
@@ -331,7 +349,6 @@ impl Game {
         (1 + self.floor).min(Module::MAX_SLOTS)
     }
     /// Lay out floor `floor`: rooms, lift, relay, archives, foes and equipment.
-    /// Floor 0 is generated exactly as it always was for a given seed.
     fn build_floor(&mut self, floor: usize) {
         let mut rng = Rng((self.seed ^ (floor as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)).max(1));
         self.tiles.fill(Tile::Wall);
@@ -341,7 +358,9 @@ impl Game {
         self.archives.clear();
         self.caches.clear();
         self.restored = false;
+        self.pickups.clear();
         let mut centers = vec![];
+        let mut rooms = vec![];
         for row in 0..2 {
             for col in 0..3 {
                 let x = 2 + col * 14 + rng.range(0, 2);
@@ -361,31 +380,61 @@ impl Game {
                     self.corridor(prev, p);
                 }
                 centers.push(p);
+                rooms.push((x, y, w, h));
             }
         }
-        self.player = centers[0];
-        self.lift = centers[0];
-        self.relay = centers[5];
-        for (i, &pos) in centers[2..5].iter().enumerate() {
+        // Extra links turn the chain of rooms into loops, so there is more than
+        // one way round a guard.
+        let mut linked = false;
+        for (a, b) in [(1, 4), (2, 5)] {
+            if rng.range(0, 3) != 0 {
+                self.corridor(centers[a], centers[b]);
+                linked = true;
+            }
+        }
+        if !linked {
+            self.corridor(centers[1], centers[4]);
+        }
+        // Roles: the lift in a corner room, the relay in the opposite corner, and
+        // the archives in three of the other four. The spare room holds the cache.
+        let lift_room = [0, 2, 3, 5][rng.range(0, 4) as usize];
+        let relay_room = 5 - lift_room;
+        let mut others: Vec<usize> = (0..6)
+            .filter(|r| *r != lift_room && *r != relay_room)
+            .collect();
+        for i in (1..others.len()).rev() {
+            others.swap(i, rng.range(0, i as i32 + 1) as usize);
+        }
+        let spare_room = others[3];
+        self.player = centers[lift_room];
+        self.lift = centers[lift_room];
+        self.relay = centers[relay_room];
+        for (i, &room) in others[..3].iter().enumerate() {
             self.archives.push(Archive {
-                pos,
+                pos: centers[room],
                 id: floor * 3 + i,
                 recovered: false,
             });
         }
         // Deeper floors trade sentinels for tougher foes instead of adding to the crowd.
-        for (i, &c) in centers.iter().enumerate().skip(1 + floor) {
-            let bonus = if i == 5 { 2 } else { 0 };
+        let mut posts: Vec<usize> = others[..3].to_vec();
+        posts.insert(0, spare_room);
+        for &room in posts.iter().skip(floor) {
             self.enemies.push(Enemy {
-                pos: c.offset(2, 1),
-                hp: EnemyKind::Sentinel.max_hp(floor) + bonus,
+                pos: centers[room].offset(2, 1),
+                hp: EnemyKind::Sentinel.max_hp(floor),
                 kind: EnemyKind::Sentinel,
             });
         }
+        self.enemies.push(Enemy {
+            pos: centers[relay_room].offset(2, 1),
+            hp: EnemyKind::Sentinel.max_hp(floor) + 2,
+            kind: EnemyKind::Sentinel,
+        });
         // Hunters join from floor 2: one more on each deeper floor.
         for h in 0..floor {
             self.enemies.push(Enemy {
-                pos: centers[2 + h].offset(-2, -1),
+                pos: centers[others[h]].offset(-2, -1),
                 hp: EnemyKind::Hunter.max_hp(floor),
                 kind: EnemyKind::Hunter,
             });
@@ -393,24 +442,56 @@ impl Game {
         // The Overseer guards the final relay.
         if floor == FLOORS - 1 {
             self.enemies.push(Enemy {
-                pos: centers[5].offset(-2, 1),
+                pos: centers[relay_room].offset(-2, 1),
                 hp: EnemyKind::Overseer.max_hp(floor),
                 kind: EnemyKind::Overseer,
             });
         }
-        // One cache per early floor, always holding a module you do not have yet.
+        // One cache per floor, always holding a module you do not have yet.
         let missing: Vec<Module> = Module::ALL
             .iter()
             .copied()
             .filter(|m| !self.owned.contains(m))
             .collect();
-        if floor < FLOORS - 1 && !missing.is_empty() {
+        if !missing.is_empty() {
             let module = missing[rng.range(0, missing.len() as i32) as usize];
             self.caches.push(Cache {
-                pos: centers[1].offset(-2, 1),
+                pos: centers[spare_room],
                 module,
                 taken: false,
             });
+        }
+        // Supplies sit in room corners, off the direct line between doors: two
+        // power cells and a medkit per floor, never in the lift room.
+        for kind in [
+            PickupKind::PowerCell,
+            PickupKind::PowerCell,
+            PickupKind::Medkit,
+        ] {
+            for _ in 0..8 {
+                let room = rng.range(0, 6) as usize;
+                let (x, y, w, h) = rooms[room];
+                let pos = Pos {
+                    x: if rng.range(0, 2) == 0 {
+                        x + 1
+                    } else {
+                        x + w - 2
+                    },
+                    y: if rng.range(0, 2) == 0 {
+                        y + 1
+                    } else {
+                        y + h - 2
+                    },
+                };
+                if room != lift_room && !self.pickups.iter().any(|p| p.pos == pos) {
+                    self.pickups.push(Pickup {
+                        pos,
+                        kind,
+                        taken: false,
+                    });
+                    break;
+                }
+            }
         }
         if floor == 0 {
             self.log(
@@ -611,8 +692,34 @@ impl Game {
             }
         } else {
             self.player = next;
+            self.collect();
         }
         self.finish_turn();
+    }
+    /// Take whatever supply lies underfoot, unless you cannot carry more.
+    fn collect(&mut self) {
+        let Some(i) = self
+            .pickups
+            .iter()
+            .position(|p| !p.taken && p.pos == self.player)
+        else {
+            return;
+        };
+        match self.pickups[i].kind {
+            PickupKind::PowerCell if self.energy < MAX_ENERGY => {
+                self.energy = (self.energy + CELL_POWER).min(MAX_ENERGY);
+                self.log("pickup", "Power cell: +2 power.");
+            }
+            PickupKind::Medkit if self.medkits < MAX_MEDKITS => {
+                self.medkits += 1;
+                self.log("pickup", "Picked up a medkit.");
+            }
+            _ => {
+                self.log("status", "You cannot carry more of that. It stays here.");
+                return;
+            }
+        }
+        self.pickups[i].taken = true;
     }
     pub fn wait(&mut self) {
         if self.outcome == Outcome::Exploring {
@@ -1098,7 +1205,7 @@ impl Game {
         if self.hp < 0
             || self.hp > MAX_HP
             || self.medkits > MAX_MEDKITS
-            || self.energy > START_ENERGY
+            || self.energy > MAX_ENERGY
             || self.enemies.len() > 12
             || self.floor >= FLOORS
             || self.archives.len() != 3
@@ -1143,7 +1250,8 @@ impl Game {
                 .any(|i| self.records_found[..i].contains(&self.records_found[i]))
             || self.caches.len() > 2
             || self.caches.iter().any(|c| !self.floor(c.pos))
-            || self.energy > START_ENERGY
+            || self.pickups.len() > 8
+            || self.pickups.iter().any(|p| !self.floor(p.pos))
             || self.actions.len() > MAX_ACTIONS
             || self.standing.iter().any(|s| s.abs() > 20)
         {
