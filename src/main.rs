@@ -1,3 +1,5 @@
+// A release build on Windows is a window, not a console program.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 use macroquad::prelude::*;
 use std::{
     cell::RefCell,
@@ -404,8 +406,21 @@ struct Pending {
     started: f64,
 }
 
+/// Finder starts a bundled app in "/", where config.json can be neither found
+/// nor saved. Work from the save folder instead.
+#[cfg(not(target_arch = "wasm32"))]
+fn settle_working_dir() {
+    let bundled =
+        std::env::current_exe().is_ok_and(|p| p.to_string_lossy().contains(".app/Contents/MacOS"));
+    if let Some(dir) = save::default_path().parent().filter(|_| bundled) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::env::set_current_dir(dir);
+    }
+}
 #[macroquad::main(config)]
 async fn main() {
+    #[cfg(not(target_arch = "wasm32"))]
+    settle_working_dir();
     let args: Vec<String> = std::env::args().collect();
     let initial_seed = args
         .windows(2)

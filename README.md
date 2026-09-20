@@ -45,6 +45,19 @@ cargo run --locked --release -- --seed 42
 
 On Windows, use `run.cmd` after installing the prerequisites in START-HERE.
 
+## Build distributions
+
+On macOS, one script builds both packages into `dist/` (git-ignored):
+
+```sh
+scripts/dist.sh            # both; or: scripts/dist.sh macos | windows
+```
+
+- `the-last-signal-<version>-macos-universal.zip`: `The Last Signal.app` for Apple silicon and Intel, ad-hoc signed. It is not notarized, so a copy downloaded from the internet needs right-click > Open the first time. The bundled app keeps `config.json` beside its save, in `~/.local/share/the-last-signal/`.
+- `the-last-signal-<version>-windows-x64.zip`: `the-last-signal.exe`, cross-compiled with MinGW-w64 (`brew install mingw-w64`; the script adds the Rust targets it needs). It links only to DLLs that ship with Windows 10 and later.
+
+On a Windows machine, run `dist.cmd` instead; it builds the MSVC executable and zips it. Neither package bundles a model: install Ollama separately for the real ECHO.
+
 ## Browser demo
 
 The same Rust game compiles to WebAssembly (`cargo build --release --target wasm32-unknown-unknown`, then serve `web/` with the `.wasm` beside `index.html`). On wasm, `ureq`, `tempfile` and disk saves are excluded, and ECHO answers from a rule-based script that reads only the discovered-state snapshot. GitHub Actions builds and publishes it on every push to `main`. `web/gl.js` is miniquad's JS loader, the same version as the crate in `Cargo.lock` (MIT/Apache-2.0).
