@@ -1,6 +1,7 @@
 use crate::core::Game;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+#[cfg(not(target_arch = "wasm32"))]
 use std::{
     io::Read,
     sync::mpsc::{self, Receiver},
@@ -25,6 +26,11 @@ impl Default for Config {
     }
 }
 impl Config {
+    #[cfg(target_arch = "wasm32")]
+    pub fn load() -> Result<Self, String> {
+        Ok(Self::default())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load() -> Result<Self, String> {
         match std::fs::read_to_string("config.json") {
             Ok(s) => {
@@ -76,10 +82,12 @@ pub fn payload(game: &Game, question: &str, config: &Config) -> serde_json::Valu
     messages.push(json!({"role":"user","content":question}));
     json!({"model":config.model,"messages":messages,"stream":false,"think":false,"keep_alive":"5m","format":{"type":"object","properties":{"reply":{"type":"string"}},"required":["reply"],"additionalProperties":false},"options":{"temperature":0.4,"num_predict":220,"num_ctx":4096}})
 }
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Deserialize)]
 struct Reply {
     reply: String,
 }
+#[cfg(not(target_arch = "wasm32"))]
 pub fn parse_response(s: &str) -> Result<String, String> {
     let envelope: serde_json::Value =
         serde_json::from_str(s).map_err(|_| "Model server returned invalid JSON")?;
@@ -99,6 +107,7 @@ pub fn parse_response(s: &str) -> Result<String, String> {
     }
     Ok(cleaned)
 }
+#[cfg(not(target_arch = "wasm32"))]
 pub fn request(config: &Config, body: serde_json::Value) -> Result<String, String> {
     config.validate()?;
     let agent = ureq::AgentBuilder::new()
@@ -124,6 +133,7 @@ pub fn request(config: &Config, body: serde_json::Value) -> Result<String, Strin
     let s = String::from_utf8(bytes).map_err(|_| "Model response was not UTF-8")?;
     parse_response(&s)
 }
+#[cfg(not(target_arch = "wasm32"))]
 pub fn start(config: Config, body: serde_json::Value) -> Receiver<Result<String, String>> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -132,7 +142,95 @@ pub fn start(config: Config, body: serde_json::Value) -> Receiver<Result<String,
     rx
 }
 
-#[cfg(test)]
+/// Built-in companion for the browser demo. It needs no model, network or key,
+/// and answers only from `Game::knowledge()`, so it cannot mention anything the
+/// player has not discovered.
+pub fn demo_reply(game: &Game, question: &str) -> String {
+    let k = game.knowledge();
+    let q = question.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| q.contains(w));
+    let records = k["discovered_records"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let keys = k["keys_recovered"].as_u64().unwrap_or(0);
+    let route = |target: &str| {
+        k["known_routes"]
+            .as_array()
+            .and_then(|rs| {
+                rs.iter()
+                    .find(|r| r["target"] == target && !r["steps"].is_null())
+            })
+            .and_then(|r| r["steps"].as_u64())
+    };
+    if has(&["north station"]) {
+        let known = records
+            .iter()
+            .any(|r| r.as_str().is_some_and(|s| s.contains("North Station")));
+        return if known {
+            "The Evacuation record says survivors left by the surface lift for North Station. Where that is, we do not know.".into()
+        } else {
+            "I have no recovered record that mentions that place. I do not know.".into()
+        };
+    }
+    if has(&["evidence", "record", "archive", "learn", "found", "tell"]) {
+        return match records.len() {
+            0 => "We have recovered nothing yet, so I have no evidence to discuss. Find an archive (A) and press E beside it.".into(),
+            n => format!("We hold {n} of 3 records. Latest: {}", records[n - 1].as_str().unwrap_or("")),
+        };
+    }
+    if has(&["hp", "health", "hurt", "medkit", "heal"]) {
+        return format!(
+            "Health {} of 24, {} medkits. H uses one to restore up to 10.",
+            k["hp"], k["medkits"]
+        );
+    }
+    if has(&["enemy", "sentinel", "threat", "danger", "monster"]) {
+        let n = k["visible_threats"].as_array().map_or(0, |t| t.len());
+        return if n == 0 {
+            "No sentinels are in sight. Unseen ones may still be near.".into()
+        } else {
+            format!(
+                "{n} sentinel(s) in sight. Bump into one to hit for 3; adjacent ones strike for 1."
+            )
+        };
+    }
+    if has(&["relay"]) {
+        return match (k["relay_restored"].as_bool().unwrap_or(false), route("relay")) {
+            (true, _) => "The relay is online. Return to the surface lift and press E.".into(),
+            (false, Some(s)) if keys == 3 => format!("All three keys are ours. The relay is {s} steps away by known routes."),
+            (false, _) if keys == 3 => "We have all three keys, but I have not seen the relay yet. Explore.".into(),
+            _ => format!("The relay needs all three archive keys; we have {keys}. I have not seen where it is."),
+        };
+    }
+    if has(&["lift", "exit", "escape", "leave"]) {
+        return format!(
+            "The surface lift is {} steps away. It only works once the relay is restored.",
+            route("lift").map_or("an unknown number of".into(), |s| s.to_string())
+        );
+    }
+    let next = if keys < 3 {
+        route("archive").map_or("Explore to find the next archive (A).".to_string(), |s| {
+            format!("The nearest known archive is {s} steps away.")
+        })
+    } else if !game.restored {
+        "Restore the relay (R).".to_string()
+    } else {
+        "Return to the lift (L) and press E.".to_string()
+    };
+    format!("Demo ECHO here: a small scripted stand-in for the local AI. {next}")
+}
+#[cfg(target_arch = "wasm32")]
+pub fn start_demo(
+    game: &Game,
+    question: &str,
+) -> std::sync::mpsc::Receiver<Result<String, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = tx.send(Ok(demo_reply(game, question)));
+    rx
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     #[test]
@@ -186,6 +284,17 @@ mod tests {
             "The relay location is still unknown."
         );
         worker.join().unwrap();
+    }
+    #[test]
+    fn demo_echo_only_knows_discovered_facts() {
+        let mut g = Game::new(42);
+        let r = demo_reply(&g, "Where is North Station? What does the evidence say?");
+        assert!(!r.contains("survivors") && !r.contains("Evacuation"));
+        g.enemies.clear();
+        g.player = g.archives[1].pos;
+        g.interact();
+        assert!(demo_reply(&g, "where is north station").contains("Evacuation"));
+        assert!(demo_reply(&g, "what should I do?").contains("Demo ECHO"));
     }
     #[test]
     fn cloud_model_is_rejected() {

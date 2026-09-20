@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The Last Signal - browser demo</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #090e13; color: #b9c6c9;
+      font: 14px/1.5 system-ui, sans-serif; overflow: hidden; }
+    body { display: flex; flex-direction: column; }
+    canvas#glcanvas { flex: 1; min-height: 0; width: 100%; outline: none; }
+    footer { padding: 6px 12px; text-align: center; background: #0d141a; }
+    a { color: #54dbb8; }
+  </style>
+</head>
+<body>
+  <canvas id="glcanvas" tabindex="1"></canvas>
+  <footer>
+    Browser demo: WASD/arrows move, E interact, H medkit, F scan, J evidence.
+    ECHO is a built-in script here; saving is off.
+    <a href="https://github.com/brucehoppe/the-last-signal">Source and desktop build with a real local AI</a>
+  </footer>
+  <script src="mq_js_bundle.js"></script>
+  <script>load("the-last-signal.wasm");</script>
+</body>
+</html>

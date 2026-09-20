@@ -10,6 +10,8 @@ default-run = "the-last-signal"
 macroquad = { version = "=0.4.16", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = { version = "=2.12.1", default-features = false, features = ["json"] }
 tempfile = "3"
 

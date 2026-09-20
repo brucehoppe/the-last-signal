@@ -1,8 +1,5 @@
 use macroquad::prelude::*;
-use std::{
-    sync::mpsc::{Receiver, TryRecvError},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use the_last_signal::{
     ai,
     core::{Game, Outcome, Pos, Tile, HEIGHT, RECORDS, WIDTH},
@@ -25,11 +22,11 @@ fn config() -> Conf {
         ..Default::default()
     }
 }
+/// True in the browser build: no disk, no Ollama; ECHO is a built-in script.
+const DEMO: bool = cfg!(target_arch = "wasm32");
 fn seed() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    // miniquad's clock works natively and in the browser; SystemTime panics on wasm.
+    (macroquad::miniquad::date::now() * 1000.) as u64
 }
 fn text(s: &str, x: f32, y: f32, size: f32, color: Color) {
     draw_text(s, x, y, size, color);
@@ -205,8 +202,13 @@ async fn main() {
         Ok(c) => (c, None),
         Err(e) => (ai::Config::default(), Some(e)),
     };
-    let mut status =
-        config_error.unwrap_or_else(|| "Local companion ready to connect when you ask.".into());
+    let mut status = config_error.unwrap_or_else(|| {
+        if DEMO {
+            "Browser demo: ECHO is a built-in script and saving is off. Get the desktop build for a real local AI.".into()
+        } else {
+            "Local companion ready to connect when you ask.".into()
+        }
+    });
     let mut prompt = String::new();
     let mut focused = false;
     let mut pending: Option<Pending> = None;
@@ -301,7 +303,17 @@ async fn main() {
         draw_rectangle(890., 24., 366., 738., PANEL);
         text("ECHO", 909., 55., 27., TEAL);
         text("LOCAL EXPEDITION COMPANION", 909., 78., 14., MUTED);
-        text(&ai_config.model, 909., 101., 15., AMBER);
+        text(
+            if DEMO {
+                "demo script"
+            } else {
+                &ai_config.model
+            },
+            909.,
+            101.,
+            15.,
+            AMBER,
+        );
         let mut transcript: Vec<(String, Color)> = vec![];
         if g.chat.is_empty() {
             transcript.extend(lines("Recover evidence. Ask about what you have found. ECHO only receives discovered game facts, but its advice can still be mistaken.",36).into_iter().map(|l|(l,MUTED)));
@@ -454,8 +466,15 @@ async fn main() {
                     ai_config = c;
                     let body = ai::payload(&g, prompt.trim(), &ai_config);
                     g.add_chat("user", prompt.trim());
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let rx = ai::start(ai_config.clone(), body);
+                    #[cfg(target_arch = "wasm32")]
+                    let rx = {
+                        let _ = body;
+                        ai::start_demo(&g, prompt.trim())
+                    };
                     pending = Some(Pending {
-                        rx: ai::start(ai_config.clone(), body),
+                        rx,
                         turn: g.turn,
                         started: get_time(),
                     });
@@ -490,7 +509,11 @@ async fn main() {
                         AMBER,
                     );
                     text(
-                        "F5 saves. Closing the window does not auto-save.",
+                        if DEMO {
+                            "Browser demo: saving is off, so reloading the page starts over."
+                        } else {
+                            "F5 saves. Closing the window does not auto-save."
+                        },
                         217.,
                         501.,
                         18.,
@@ -501,11 +524,13 @@ async fn main() {
                     {
                         screen = Screen::Game;
                     }
-                    if button(
-                        "LOAD SAVE",
-                        Rect::new(460., 541., 180., 42.),
-                        pending.is_none(),
-                    ) {
+                    if !DEMO
+                        && button(
+                            "LOAD SAVE",
+                            Rect::new(460., 541., 180., 42.),
+                            pending.is_none(),
+                        )
+                    {
                         match save::read(&path) {
                             Ok(loaded) => {
                                 g = loaded;

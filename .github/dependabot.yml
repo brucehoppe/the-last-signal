@@ -4,6 +4,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # ureq is exact-pinned; 3.x is a breaking API rewrite to migrate deliberately.
+      - dependency-name: ureq
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

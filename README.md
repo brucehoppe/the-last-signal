@@ -1,5 +1,7 @@
 # The Last Signal
 
+**[Try it in your browser](https://brucehoppe.github.io/the-last-signal/)**: a WebAssembly build of the real game. ECHO is a built-in script there and saving is off; the desktop build talks to a real local model through Ollama.
+
 An original Rust expedition roguelike with an optional local-LLM companion.
 
 **Version 0.1.0: a playable prototype and development handoff, not a finished commercial game.**
@@ -35,6 +37,10 @@ cargo run --locked --release -- --seed 42
 ```
 
 On Windows, use `run.cmd` after installing the prerequisites in START-HERE.
+
+## Browser demo
+
+The same Rust game compiles to WebAssembly (`cargo build --release --target wasm32-unknown-unknown`, then serve `web/` with the `.wasm` beside `index.html`). On wasm, `ureq`, `tempfile` and disk saves are excluded, and ECHO answers from a rule-based script that reads only the discovered-state snapshot. GitHub Actions builds and publishes it on every push to `main`. `web/mq_js_bundle.js` is macroquad's JS loader (MIT/Apache-2.0).
 
 ## Local AI
 

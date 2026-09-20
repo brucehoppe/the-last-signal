@@ -1,14 +1,14 @@
 use crate::core::Game;
+#[cfg(not(target_arch = "wasm32"))]
 use serde::{Deserialize, Serialize};
-use std::{
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Serialize, Deserialize)]
 struct Envelope {
     version: u32,
     game: Game,
 }
+#[cfg(not(target_arch = "wasm32"))]
 pub fn default_path() -> PathBuf {
     if let Some(p) = std::env::var_os("LAST_SIGNAL_SAVE") {
         return PathBuf::from(p);
@@ -23,6 +23,7 @@ pub fn default_path() -> PathBuf {
     base.unwrap_or_else(|| PathBuf::from("."))
         .join("the-last-signal/expedition.save.json")
 }
+#[cfg(not(target_arch = "wasm32"))]
 pub fn write(game: &Game, path: &Path) -> Result<(), String> {
     game.validate()?;
     let parent = path
@@ -30,6 +31,7 @@ pub fn write(game: &Game, path: &Path) -> Result<(), String> {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    use std::io::Write;
     let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
     serde_json::to_writer_pretty(
         &mut tmp,
@@ -44,6 +46,7 @@ pub fn write(game: &Game, path: &Path) -> Result<(), String> {
     tmp.persist(path).map_err(|e| e.to_string())?;
     Ok(())
 }
+#[cfg(not(target_arch = "wasm32"))]
 pub fn read(path: &Path) -> Result<Game, String> {
     use std::io::Read;
     let file = std::fs::File::open(path).map_err(|e| format!("Cannot open save: {e}"))?;
@@ -62,6 +65,7 @@ pub fn read(path: &Path) -> Result<Game, String> {
     envelope.game.validate()?;
     Ok(envelope.game)
 }
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,4 +93,20 @@ mod tests {
         g.tiles.clear();
         assert!(write(&g, &p).is_err());
     }
+}
+
+// The browser demo has no filesystem: saving is switched off, not faked.
+#[cfg(target_arch = "wasm32")]
+pub const UNAVAILABLE: &str = "Saving is disabled in the browser demo.";
+#[cfg(target_arch = "wasm32")]
+pub fn default_path() -> PathBuf {
+    PathBuf::new()
+}
+#[cfg(target_arch = "wasm32")]
+pub fn write(_: &Game, _: &Path) -> Result<(), String> {
+    Err(UNAVAILABLE.into())
+}
+#[cfg(target_arch = "wasm32")]
+pub fn read(_: &Path) -> Result<Game, String> {
+    Err(UNAVAILABLE.into())
 }
