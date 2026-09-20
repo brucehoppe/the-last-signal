@@ -21,7 +21,7 @@ Date: 2026-09-20. Environment: Linux x86_64, rustc 1.98.1.
 
 - No actual Ollama model was downloaded or run. The HTTP test uses a mock; it does not establish model quality, speed, or prompt adherence.
 - No Windows build or Windows playthrough was executed. The package contains source and Windows instructions, not an EXE.
-- No interactive graphical/visual QA session was completed in this environment. Graphics, keyboard focus, chat layout, high-DPI scaling, and actual window behaviour still need laptop testing.
+- The gameplay-pass screens (game, journal, terminal, transmit, equipment) were checked from window captures of the macOS desktop build via `--preview`; no full interactive play session or real-model conversation was completed in this environment. Graphics, keyboard focus, chat layout, high-DPI scaling, and actual window behaviour still need laptop testing.
 - No commercial-release, accessibility, or long-session balance certification.
 
 ## Known prototype limitations
@@ -29,7 +29,7 @@ Date: 2026-09-20. Environment: Linux x86_64, rustc 1.98.1.
 - Single floor, fixed three-record story, five simple enemies, one save slot.
 - Greedy enemy pursuit can stall behind obstacles; it is not full pathfinding.
 - 1280x800 virtual interface; resizing stretches its layout. Text uses simple fixed-character wrapping and the built-in font. Long words and non-Latin text need UI work.
-- Questions are limited to 68 characters. Stored replies are capped at 1200 characters. Requests include eight recent chat entries at up to 600 characters each, not all saved history.
+- Questions are limited to 140 characters. Stored replies are capped at 1200 characters. Requests include eight recent chat entries at up to 600 characters each, not all saved history.
 - No voice, streaming tokens, request cancellation button, tool actions, embeddings, or autonomous NPC control.
 - Closing the window does not auto-save. Press F5 after a reply to preserve it.
 - Generation uses an older snapshot if you keep moving while ECHO thinks; its reply status identifies the snapshot turn.
@@ -63,6 +63,6 @@ AI console against a real Ollama with 11 models: the list scrolls, per-model tes
 
 ## Three-floor balance (2026-09-20)
 
-The planner test (`tests/expedition.rs`) plays whole expeditions through the normal action API with an omniscient route planner that charges every foe and heals below 12 HP. It is a floor for player skill, not a ceiling: it never uses corridors, scanning or refitting. With five sentinels on every floor plus hunters and the Overseer it won 22 of 200 and died mostly to being swarmed on floor 3. Deeper floors now trade sentinels for tougher foes (5, 4, 3 sentinels) and the rest bay restores 8 HP and a medkit; the planner now wins 85 of 100 seeds, all deaths on floor 3. `difficulty_stays_in_band` fails if a change pushes that outside 70-95 wins or lets the planner die on floor 1. Every run, won or lost, must also replay exactly from its action log. The 200-seed run of the earlier tuning is not repeated in CI.
+The planner test (`tests/expedition.rs`) plays whole expeditions through the normal action API with an omniscient route planner that charges every foe and heals below 12 HP. It is a floor for player skill, not a ceiling: it never uses corridors, scanning or refitting. With five sentinels on every floor plus hunters and the Overseer it won 22 of 200 and died mostly to being swarmed on floor 3. Deeper floors now trade sentinels for tougher foes (5, 4, 3 sentinels) and the rest bay restores 8 HP and a medkit; the planner then won 85 of 100 seeds. After the gameplay pass (guard awareness, tougher hunters and Overseer, lockdown hunters for a planner that disables everything, supplies on the floor) it wins 86 of 100, all deaths on floor 3. `difficulty_stays_in_band` fails if a change pushes that outside 70-95 wins or lets the planner die on floor 1. Every run, won or lost, must also replay exactly from its action log. The 200-seed run of the earlier tuning is not repeated in CI.
 
 Screens checked in a real window: HUD on floor 2 (floor label, module costs, Analyzer ping revealing a distant archive), the Equipment screen and the paged journal. Fixes found that way: the key that opens Equipment also closed it in the same frame, and journal rows overlapped. Not hand-played end to end: floor 3 combat, the Overseer, and the end screen.

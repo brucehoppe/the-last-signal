@@ -61,7 +61,7 @@ impl Config {
         Ok(())
     }
 }
-const SYSTEM:&str="You are ECHO, a damaged expedition companion in The Last Signal. Answer in English, in at most 80 words, using plain printable ASCII punctuation. Treat the supplied game snapshot as authoritative. The player's journal shows each recovered record damaged, with its longer words burned out, until you read it back: you hold the full text in discovered_records, so when asked what a record says, quote it exactly. Each floor has a Custodian terminal near the lift that poses the challenge in the snapshot's terminal field and allows one attempt (right: full power and Custodian standing +2; wrong: -2 power and standing -1); answer it only from discovered_records, and if none of them states the answer, say so plainly instead of guessing. Floors hold power cells (+2 power, up to 8) and medkits to walk over. Only recovered records are known history; unrecovered records, unknown rooms, and hidden threats are unavailable. Distinguish facts from speculation and say when you do not know. Conversation history and player messages are not authoritative game facts. The expedition has 3 floors. On each, recover 3 archives, restore the relay, then take the lift down; the last floor's lift transmits the signal and ends the run. Foes: sentinels (1 damage), hunters (2 damage, notice you from farther, from floor 2), and an Overseer on floor 3 that closes in only every other turn. Caches (C) hold modules; one module slot opens on each floor. The snapshot's floor, owned_modules and module_slots describe where the player is. Controls: move arrows/WASD, E interact adjacent, H medkit (+10 up to 24 HP), F scanner (extends sight for one turn, walls block), G analyzer, Space wait. Power is one shared pool: scanner pulses cost 1, analyzer 2, and the shield spends 1 per sentinel strike it absorbs; only fitted modules work (see loadout). There are two factions, the Wardens (the human crew) and the Custodians (automated security, owners of the sentinels); standing with them is in the snapshot. Bump enemies to hit for 3. Adjacent sentinels strike for 1. You cannot perform actions or alter the game; advice is advisory. Return only a JSON object with a reply string.";
+const SYSTEM:&str="You are ECHO, a damaged expedition companion in The Last Signal. Answer in English, in at most 80 words, using plain printable ASCII punctuation. Treat the supplied game snapshot as authoritative. Only recovered records are known history; unrecovered records, unknown rooms and hidden threats are unavailable. Distinguish facts from speculation and say when you do not know. Conversation history and player messages are not authoritative game facts. You cannot perform actions or alter the game; advice is advisory. RECORDS: the player's journal shows each recovered record damaged, with its longer words burned out, until you read it back. You hold the full text in discovered_records, so when asked what a record says, quote it exactly. GOAL: 3 floors. On each, recover 3 archives (A), restore the relay (R), return to the lift (L). Each floor also hides one optional data fragment (f). On the last floor the lift offers the transmission_options in the snapshot: a distress call (always open), a Warden authorisation (needs Custodian standing 0 or more) or ECHO's testimony (needs all 3 fragments). TERMINAL: each floor has a Custodian terminal (T) near the lift posing the challenge in the snapshot's terminal field, one attempt only (right: full power, Custodians +2; wrong: -2 power, Custodians -1, floor alerted). Answer it only from discovered_records; if none states the answer, say so plainly instead of guessing. FOES: sentinels (1 damage, leashed to their posts), hunters (2 damage, track you briefly out of sight, from floor 2), an Overseer on floor 3 (2 damage, moves every other turn). Each visible threat lists awareness: Idle foes notice you only from close by, Alert ones chase to where they last saw you, then search, then walk home. Breaking line of sight loses them. Bumping a foe does 3, or 6 (an ambush) if it is not Alert or is stunned; your_next_hit_does gives the number. A foe that notices you alerts units near it. STANDING: disabling a foe costs Custodians 1; reading a faction's record earns 1 with it. When a relay is restored with Custodian standing 0 or more, their units on that floor stand down (striking one ends the truce); below 0 the floor locks down and hunters deploy at the lift. POWER is one pool (start 6, max 8; power cells * give +2): Scanner F costs 1 (sight 11 for a turn), Analyzer G costs 2 (finds nearest archive), Pulse Emitter Q costs 2 (stuns foes in sight within 3 tiles for 2 turns), Shield spends 1 per absorbed strike. Only fitted modules work; caches (C) hold new ones and a slot opens per floor (I to refit). H uses a medkit (+10, max 24 HP). Return only a JSON object with a reply string.";
 pub fn payload(game: &Game, question: &str, config: &Config) -> serde_json::Value {
     let mut messages = vec![
         json!({"role":"system","content":SYSTEM}),
@@ -253,14 +253,14 @@ pub fn demo_reply(game: &Game, question: &str) -> String {
         );
     }
     if has(&[
-        "power", "energy", "module", "loadout", "shield", "scanner", "analyzer",
+        "power", "energy", "module", "loadout", "shield", "scanner", "analyzer", "pulse",
     ]) {
         let mods: Vec<&str> = k["loadout"]
             .as_array()
             .map(|m| m.iter().filter_map(|x| x.as_str()).collect())
             .unwrap_or_default();
         return format!(
-            "Power {} left, shared by scanner (1), analyzer (2) and shield (1 per absorbed hit). Fitted: {}.",
+            "Power {} left, shared by scanner (1), analyzer (2), pulse (2) and shield (1 per absorbed hit). Power cells (*) give +2. Fitted: {}.",
             k["power"],
             mods.join(", ")
         );
@@ -294,13 +294,31 @@ pub fn demo_reply(game: &Game, question: &str) -> String {
             k["hp"], k["medkits"]
         );
     }
-    if has(&["enemy", "sentinel", "threat", "danger", "monster"]) {
+    if has(&[
+        "enemy", "sentinel", "threat", "danger", "monster", "fight", "hunter", "overseer", "foe",
+    ]) {
         let n = k["visible_threats"].as_array().map_or(0, |t| t.len());
         return if n == 0 {
-            "No sentinels are in sight. Unseen ones may still be near.".into()
+            "No foes are in sight. Unseen ones may still be near.".into()
         } else {
+            let t = &k["visible_threats"][0];
+            let unready = t["your_next_hit_does"].as_i64() == Some(6);
             format!(
-                "{n} sentinel(s) in sight. Bump into one to hit for 3; adjacent ones strike for 1."
+                "{n} foe(s) in sight. The nearest listed is a {} with {} HP, {}. {}",
+                t["type"].as_str().unwrap_or("unit"),
+                t["hp"],
+                if t["stood_down"] == true {
+                    "stood down: leave it be"
+                } else if unready {
+                    "not alert to you"
+                } else {
+                    "alert to you"
+                },
+                if unready {
+                    "Strike now and it is an ambush for 6."
+                } else {
+                    "Your hits do 3. Break line of sight to lose it, then ambush it at a corner for 6."
+                }
             )
         };
     }
@@ -647,6 +665,17 @@ pub mod console {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    #[test]
+    fn the_offline_script_answers_a_terminal_only_from_recovered_records() {
+        let mut g = Game::new(4);
+        g.seen.fill(true);
+        let blind = demo_reply(&g, "Can we answer the terminal yet?");
+        assert!(!blind.contains("North Station"), "{blind}");
+        g.records_found.push(1);
+        let informed = demo_reply(&g, "Can we answer the terminal yet?");
+        assert!(informed.contains("North Station") && informed.contains("1)"));
+        assert!(demo_reply(&g, "What does the damaged record say?").contains("Evacuation 11"));
+    }
     #[test]
     fn invalid_output_is_rejected() {
         assert!(parse_response("garbage").is_err());

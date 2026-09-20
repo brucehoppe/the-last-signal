@@ -297,12 +297,12 @@ impl Module {
     pub fn effect(self) -> &'static str {
         match self {
             Module::Scanner => "Sight radius 11 for one turn. Costs 1 power per pulse.",
-            Module::Shield => "Absorbs a sentinel strike. Costs 1 power per hit absorbed.",
+            Module::Shield => "Absorbs a foe's strike. Costs 1 power per hit absorbed.",
             Module::Analyzer => {
                 "Pinpoints the nearest unrecovered archive through walls. Costs 2 power."
             }
             Module::Pulse => {
-                "Stuns every foe in sight within 3 tiles for 2 turns; stunned foes take 6. Costs 2 power."
+                "Stuns foes in sight within 3 tiles for 2 turns; stunned foes take 6. Costs 2 power."
             }
         }
     }
@@ -347,6 +347,22 @@ pub const RECORD_AUTHORS: [Faction; 12] = [
     Faction::Wardens,
     Faction::Custodians,
     Faction::Custodians,
+];
+/// What ECHO makes of each record once it has read it back: the practical
+/// consequence, so that evidence changes what the player knows how to do.
+pub const ECHO_NOTES: [&str; 12] = [
+    "ECHO: The coolant went down, so the answers are down. Every relay we restore frees the lift.",
+    "ECHO: North Station. Keep that name; Custodian terminals test operators on the record.",
+    "ECHO: Three keys, the relay, then back to the lift. That is the whole procedure, floor by floor.",
+    "ECHO: The flooding was deliberate, to stop a reactor. This floor's terminal asks about exactly that.",
+    "ECHO: The Wardens sealed these levels behind them. Nobody was meant to come back this way.",
+    "ECHO: Sentinels hold posts. Break line of sight and they walk home; they will not chase far from it.",
+    "ECHO: A mast at North Station. If our signal reaches it, the whole network hears.",
+    "ECHO: They need an authorised signal. If the Custodians trust us (standing 0 or more) we can send one from the vault.",
+    "ECHO: Never enemies, only unfinished. We get to choose what finishes them.",
+    "ECHO: They never meant to return. The Custodians have been keeping a promise nobody else kept.",
+    "ECHO: Assisted, not harmed. Restore a relay in good standing and their units stand down.",
+    "ECHO: ...That is me. Coordination intelligence. Partitioned. I did not know. With all three fragments I can testify.",
 ];
 /// What you send from the vault lift. The evidence and the trust you gathered
 /// decide which of these are open to you.
@@ -1367,6 +1383,9 @@ impl Game {
             .filter(|id| !self.decoded.contains(id))
             .collect();
         self.decoded.extend(&new);
+        for id in new.iter().rev().take(2).rev() {
+            self.log("echo", ECHO_NOTES[*id]);
+        }
         if !new.is_empty() {
             self.log(
                 "echo",
@@ -1766,7 +1785,7 @@ impl Game {
                 serde_json::json!({"target":kind,"position":pos,"steps":steps,"as_of_turn":self.turn})
             })
             .collect();
-        serde_json::json!({"turn":self.turn,"known_routes":routes,"position":self.player,"hp":self.hp,"medkits":self.medkits,"power":self.energy,"loadout":self.loadout.iter().map(|m|m.name()).collect::<Vec<_>>(),"owned_modules":self.owned.iter().map(|m|m.name()).collect::<Vec<_>>(),"module_slots":self.slots(),"floor":{"number":self.floor+1,"of":FLOORS,"name":FLOOR_NAMES[self.floor]},"known_caches":self.caches.iter().filter(|c|!c.taken&&self.discovered(c.pos)).map(|c|c.pos).collect::<Vec<_>>(),"factions":Faction::ALL.iter().map(|f|serde_json::json!({"name":f.name(),"about":f.about(),"standing":self.standing_of(*f)})).collect::<Vec<_>>(),"keys_recovered":self.recovered(),"relay_restored":self.restored,"outcome":self.outcome,"discovered_records":facts,"visible_threats":threats,"known_archives":landmarks,"known_lift":self.lift,"known_relay":if self.discovered(self.relay){Some(self.relay)}else{None},"terminal":self.terminal.as_ref().filter(|t|self.discovered(t.pos)).map(|t|{let c=&CHALLENGES[self.floor];serde_json::json!({"position":t.pos,"state":t.state,"challenge":c.question,"options":c.options,"note":"One attempt. The answer is stated in a record from this floor; if no discovered record states it, say so."})}),"records_player_cannot_read_yet":self.records_found.iter().filter(|id|!self.decoded.contains(id)).count(),"known_supplies":self.pickups.iter().filter(|p|!p.taken&&self.discovered(p.pos)).map(|p|serde_json::json!({"kind":p.kind,"position":p.pos})).collect::<Vec<_>>(),"data_fragments_found":self.records_found.iter().filter(|id|**id>=FRAGMENT_BASE).count(),"transmission_options":if self.floor+1==FLOORS&&self.restored{Some(Signal::ALL.iter().map(|s|serde_json::json!({"signal":s.name(),"effect":s.about(),"open":self.signal_open(*s).is_ok(),"blocked_because":self.signal_open(*s).err()})).collect::<Vec<_>>())}else{None},"score":self.score(),"recent_events":self.events.iter().rev().take(16).collect::<Vec<_>>()})
+        serde_json::json!({"turn":self.turn,"known_routes":routes,"position":self.player,"hp":self.hp,"medkits":self.medkits,"power":self.energy,"loadout":self.loadout.iter().map(|m|m.name()).collect::<Vec<_>>(),"owned_modules":self.owned.iter().map(|m|m.name()).collect::<Vec<_>>(),"module_slots":self.slots(),"floor":{"number":self.floor+1,"of":FLOORS,"name":FLOOR_NAMES[self.floor]},"known_caches":self.caches.iter().filter(|c|!c.taken&&self.discovered(c.pos)).map(|c|c.pos).collect::<Vec<_>>(),"factions":Faction::ALL.iter().map(|f|serde_json::json!({"name":f.name(),"about":f.about(),"standing":self.standing_of(*f)})).collect::<Vec<_>>(),"keys_recovered":self.recovered(),"relay_restored":self.restored,"outcome":self.outcome,"discovered_records":facts,"visible_threats":threats,"known_archives":landmarks,"known_lift":self.lift,"known_relay":if self.discovered(self.relay){Some(self.relay)}else{None},"terminal":self.terminal.as_ref().filter(|t|self.discovered(t.pos)).map(|t|{let c=&CHALLENGES[self.floor];serde_json::json!({"position":t.pos,"state":t.state,"challenge":c.question,"options":c.options,"note":"One attempt. The answer is stated in a record from this floor; if no discovered record states it, say so."})}),"records_player_cannot_read_yet":self.records_found.iter().filter(|id|!self.decoded.contains(id)).count(),"known_supplies":self.pickups.iter().filter(|p|!p.taken&&self.discovered(p.pos)).map(|p|serde_json::json!({"kind":p.kind,"position":p.pos})).collect::<Vec<_>>(),"data_fragments_found":self.records_found.iter().filter(|id|**id>=FRAGMENT_BASE).count(),"transmission_options":if self.floor+1==FLOORS&&self.restored{Some(Signal::ALL.iter().map(|s|serde_json::json!({"signal":s.name(),"effect":s.about(),"open":self.signal_open(*s).is_ok(),"blocked_because":self.signal_open(*s).err()})).collect::<Vec<_>>())}else{None},"score":self.score(),"recent_events":self.events.iter().rev().take(10).collect::<Vec<_>>()})
     }
     /// Bring a save from an older schema up to date (missing fields default).
     pub fn migrate(&mut self) {

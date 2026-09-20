@@ -27,7 +27,7 @@ Only one request may be active in the UI. Load and New Expedition are disabled w
 
 ## Knowledge boundary
 
-The model receives player status, visible enemies, discovered archive locations, recovered record text, the known lift, a relay location only after discovery, the last sixteen player-observable events, and recent chat. It does not receive the seed, the full map, hidden enemy locations, or unrecovered record text.
+The model receives player status, visible enemies, discovered archive locations, recovered record text, the known lift, a relay location only after discovery, the last ten player-observable events, the terminal's challenge and options once the terminal has been seen, transmission options on the last floor, and recent chat. It does not receive the seed, the full map, hidden enemy locations, unrecovered record text, or any terminal's answer. If the request fails, the built-in script (`ai::demo_reply`) answers from the same snapshot.
 
 Records persist independently of the event log. Conversation is capped at 100 entries, 1200 characters each. Eight recent entries, each truncated to 600 characters, are submitted. Player questions are limited to 68 characters by the compact two-line input widget. Event history is capped at 2000 entries. This is bounded episodic memory; there is no vector database, summary model, or training step.
 

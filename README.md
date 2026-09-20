@@ -6,26 +6,28 @@ An original Rust expedition roguelike with an optional local-LLM companion.
 
 **Version 0.1.0: a playable prototype and development handoff, not a finished commercial game.**
 
-You enter a silent research complex, recover three archive keys, restore a relay, and return to the lift. ECHO, an optional local AI companion, discusses evidence you have actually discovered. Combat, discovery, objectives, and rewards are enforced by Rust.
+You descend a silent research complex: on each floor recover three archive keys, restore the relay and return to the lift, then choose what to transmit from the vault. The records you recover are damaged, and ECHO, your local AI companion, is the only one who can read them back. Combat, discovery, objectives, and rewards are enforced by Rust.
 
 Start with **[START-HERE.md](START-HERE.md)**. No reference repositories need to be downloaded.
 
 ## Included
 
-- **Three floors** (The Surface Complex, The Coolant Levels, The Signal Vault), each six connected procedural rooms with reproducible seeds. Restoring a floor's relay unlocks its lift; the last lift transmits the signal.
-- Wall-blocked field of view, explored-map memory and bump combat against three foe types: **Sentinels**, **Hunters** (hit for 2, notice you from farther, from floor 2) and an **Overseer** guarding the last relay (heavy: it closes in every other turn).
-- **Equipment found in the world**: you begin with one module; caches (C) hold the others and a slot opens on each floor. Press I to refit (each swap costs a turn).
-- Nine recoverable records across the floors (paged journal), relay restoration and extraction. Each descent restores 8 health, power and a medkit.
-- Health, medkits and a shared **power pool** spent by fitted modules (Scanner Array, Shield Cell, Field Analyzer; two slots, chosen on the Loadout screen); victory and defeat with a ranked epilogue.
-- Two factions, the **Wardens** (the human crew) and the **Custodians** (automated security). Recovering Warden records and restoring the relay raise standing; disabling sentinels lowers the Custodians'. Both show in the journal and ECHO knows them.
-- Contextual onboarding hints, sentinel threat halos and HP bars, and energy costs shown on the HUD.
+- **Three floors** (The Surface Complex, The Coolant Levels, The Signal Vault), each six procedural rooms joined into **loops**, so there is more than one way round a guard. The lift, relay, archive and cache rooms are shuffled per seed.
+- **A reason to talk to ECHO.** Records come out of the failing archives *damaged*, with their longer words burned out. Only ECHO holds the full text: ask it what a record says and the journal shows it whole, along with ECHO's note on what it means for you. Each floor has a one-attempt **Custodian terminal** whose answer is written in that floor's records (right: full power and Custodian trust; wrong: drained power and an alerted floor). The ECHO panel offers **one-click questions**, and asking the way draws a **game-computed route** on the map. If Ollama is down, ECHO answers from its built-in script instead of failing.
+- **Guards with awareness**: foes notice you later when idle at their posts, signal nearby units, path round corners, chase to where they last saw you, search, then walk home. Sentinels are leashed to their posts; Hunters track you briefly out of sight; the Overseer is slow and heavy. Break line of sight to lose them.
+- **Ambushes**: striking a foe that is not alert to you, or is stunned, does 6 instead of 3. Wait round a corner for a searching foe.
+- **Four power modules** found in caches (one per floor, a slot opens per floor): Scanner Array, Shield Cell, Field Analyzer and the **Pulse Emitter** (stuns foes in sight). All draw on one power pool; **power cells** and **medkits** lie in room corners.
+- **Standing that matters**: disabling foes costs Custodian trust; reading a faction's records and answering terminals earns it. Restore a relay in good standing and the Custodians' units **stand down** for your walk back; in bad standing the floor **locks down** and hunters deploy at the lift.
+- **Optional data fragments**, one per floor, off the main path. The last one tells ECHO what it really is.
+- **A choice of last signal** at the vault lift: a distress call, a Warden authorisation (needs Custodian trust) or ECHO's testimony (needs every fragment), each with its own rank and epilogue. Runs are **scored**, and a **daily signal** gives everyone the same seed for the day.
+- Contextual onboarding hints, threat halos, awareness markers (! alert, ? searching, z stunned, - stood down), floating hit feedback and power costs on the HUD.
 - A deterministic **action log**: every run replays from its seed, loadout and actions (`Game::replay_matches`).
 - An **AI console** (title menu, or C) that lists your installed Ollama models, benchmarks them against this game's grounding rules, and saves your pick to `config.json`.
 - An original graphical desktop interface drawn with code, with no external art assets.
 - A real Ollama HTTP integration on a background thread, with JSON-schema responses, timeouts, bounded response size, and no remote fallback URL.
-- A discovered-state context builder and saved conversation history.
-- Versioned JSON saves written through a temporary file and atomic replacement.
-- Tests for connectivity, visibility, knowledge filtering, outcomes, saves, and the local HTTP contract.
+- A discovered-state context builder (the model never sees unrecovered records, unseen rooms, hidden foes or terminal answers) and saved conversation history.
+- Versioned JSON saves written through a temporary file and atomic replacement; older saves migrate.
+- Tests for connectivity, visibility, knowledge filtering, guard behaviour, terminals, endings, saves, difficulty band and the local HTTP contract.
 
 ## Run
 
@@ -55,18 +57,19 @@ Install and open Ollama, then download a local model:
 ollama pull qwen3:4b
 ```
 
-Open the **AI console** from the title menu to see every installed model, test them (each is asked to avoid leaking a record you have not recovered and to use one you have, and is timed) and pick the best. Or click the chat box, type a question, and press Enter. The model is not included in this ZIP. You can play without Ollama. To change the model or port, copy `config.example.json` to `config.json`; configuration is reloaded for every request. Model speed and quality depend on hardware. This is a starting candidate, not a benchmarked best model.
+Open the **AI console** from the title menu to see every installed model, test them (each is asked to avoid leaking a record you have not recovered and to use one you have, and is timed) and pick the best. Or click the chat box, type a question, and press Enter. If the model cannot be reached, ECHO answers from its built-in script and says so. The model is not included in this ZIP. You can play without Ollama. To change the model or port, copy `config.example.json` to `config.json`; configuration is reloaded for every request. Model speed and quality depend on hardware. This is a starting candidate, not a benchmarked best model.
 
 ## Controls
 
 | Key | Action |
 |---|---|
-| Arrows / WASD | Move; bump a sentinel to attack |
-| E | Interact from the same or an adjacent tile |
+| Arrows / WASD | Move; bump a foe to attack (3, or 6 as an ambush); walk over supplies and fragments |
+| E | Interact from the same or an adjacent tile: archive, cache, terminal, relay, lift |
 | H | Use a medkit: up to 10 HP, maximum 24 |
 | F | Scanner Array: spend 1 power to extend sight until the next turn |
 | I | Equipment: fit or unfit found modules (costs a turn) |
 | G | Field Analyzer: spend 2 power to pinpoint the nearest unrecovered archive through walls |
+| Q | Pulse Emitter: spend 2 power to stun foes in sight within 3 tiles for 2 turns |
 | M / C (title menu) | Starting-module choice / AI console |
 | Space | Wait one turn |
 | J | Open recovered evidence |
@@ -74,6 +77,7 @@ Open the **AI console** from the title menu to see every installed model, test t
 | Escape | Unfocus chat, close journal, or open pause menu |
 | Enter | Start/resume from menu, or submit focused chat |
 | Mouse wheel over chat | Scroll conversation |
+| Click a suggested question | Ask ECHO in one click |
 
 While typing in chat, movement keys enter text. Click outside the box or press Escape to return to movement. The game does not auto-save on closing. A save made during generation contains the player's question but not a reply that has not arrived yet; save again after the reply if you want it persisted.
 

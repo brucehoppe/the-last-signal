@@ -416,6 +416,29 @@ async fn main() {
     let mut loadout = the_last_signal::core::default_loadout();
     let mut g = Game::new_with(initial_seed, &loadout);
     let mut screen = Screen::Title;
+    // Developer aid: `--preview N` opens screen N on a revealed map with one record
+    // recovered, so layouts can be checked without playing to them.
+    if let Some(n) = args
+        .windows(2)
+        .find(|w| w[0] == "--preview")
+        .and_then(|w| w[1].parse::<u32>().ok())
+    {
+        g.seen.fill(true);
+        g.player = g.archives[0].pos.offset(-1, 0);
+        g.interact();
+        if let Some(t) = &g.terminal {
+            g.player = t.pos.offset(1, 0);
+        }
+        g.update_visibility(7);
+        screen = match n {
+            2 => Screen::Journal,
+            3 => Screen::Terminal,
+            4 => Screen::Transmit,
+            5 => Screen::Equip,
+            6 => Screen::NewConfirm,
+            _ => Screen::Game,
+        };
+    }
     let profile = std::env::var_os("LAST_SIGNAL_PROFILE").is_some();
     let (mut frames, mut frame_sum, mut frame_max, mut map_sum) = (0u32, 0., 0f32, 0.);
     let mut console_models: Vec<ai::console::ModelInfo> = vec![];
@@ -447,6 +470,10 @@ async fn main() {
     let mut overlay: Option<(Pos, usize)> = None;
     let mut overlay_path: Vec<Pos> = vec![];
     let mut overlay_turn = u32::MAX;
+    // Short-lived feedback over the player: (label, colour, time born).
+    let mut floats: Vec<(String, Color, f64)> = vec![];
+    let mut events_seen = g.events.len();
+    let mut hurt_at = -1.0f64;
     loop {
         // from_display_rect is y-up in macroquad 0.4; the UI is laid out y-down.
         let mut camera = Camera2D::from_display_rect(Rect::new(0., 0., 1280., 800.));
@@ -592,8 +619,57 @@ async fn main() {
                 .and_then(|(t, _)| g.known_route(t))
                 .unwrap_or_default();
         }
+        let now = get_time();
+        // A loaded or restarted game changes the log wholesale: nothing to animate.
+        if g.events.len() < events_seen || g.events.len() > events_seen + 8 {
+            events_seen = g.events.len();
+        }
+        for e in &g.events[events_seen..] {
+            let float = match e.kind.as_str() {
+                "damage" => {
+                    hurt_at = now;
+                    Some(("HIT", CORAL))
+                }
+                "combat" if e.text.starts_with("Ambush") => Some(("AMBUSH 6", AMBER)),
+                "combat" if e.text.ends_with("disabled.") => Some(("DISABLED", LIGHT)),
+                "shield" => Some(("ABSORBED", TEAL)),
+                "pickup" => Some(("SUPPLIES", TEAL)),
+                "pulse" => Some(("PULSE", TEAL)),
+                "alert" => Some(("SPOTTED", CORAL)),
+                "lockdown" => Some(("LOCKDOWN", CORAL)),
+                "standdown" => Some(("TRUCE", TEAL)),
+                _ => None,
+            };
+            if let Some((label, color)) = float {
+                floats.push((label.into(), color, now));
+            }
+        }
+        events_seen = g.events.len();
+        floats.retain(|f| now - f.2 < 1.1);
         let map_t = get_time();
         draw_map(&g, &overlay_path);
+        for (i, (label, color, born)) in floats.iter().rev().take(3).enumerate() {
+            let age = (now - born) as f32;
+            let x = (37. + g.player.x as f32 * 19. - label.len() as f32 * 4.).clamp(30., 780.);
+            let y = 100. + g.player.y as f32 * 19. - age * 26. - i as f32 * 15.;
+            text(
+                label,
+                x,
+                y.max(118.),
+                14.,
+                Color::new(color.r, color.g, color.b, (1.1 - age).clamp(0., 1.)),
+            );
+        }
+        if now - hurt_at < 0.25 {
+            draw_rectangle_lines(
+                24.,
+                105.,
+                844.,
+                540.,
+                6.,
+                Color::new(0.99, 0.40, 0.34, 1. - ((now - hurt_at) / 0.25) as f32),
+            );
+        }
         map_sum += get_time() - map_t;
         text(
             "ARCHIVE A  RELAY R  LIFT L  CACHE C  TERMINAL T  FRAGMENT f  POWER *  MEDKIT +  FOE S H O",
@@ -867,9 +943,9 @@ async fn main() {
                         TEAL,
                     );
                     wrapped("The complex is silent. On each of three floors, recover three archive keys, restore the relay, and take the lift down. Transmit the last signal from the vault.",217.,270.,76,22.,LIGHT,4);
-                    wrapped("ECHO is your optional local companion. Ask about discoveries as you explore. Ollama runs separately on your computer; no model is bundled. The expedition remains playable without it.",217.,377.,88,18.,MUTED,4);
+                    wrapped("The archives are failing: records come out damaged, and only ECHO, your companion, can read them back. Ask it what they say, how to answer the Custodian terminals, and which way to go. With Ollama it is a real local model; without it, a built-in script answers.",217.,377.,88,18.,MUTED,4);
                     text(
-                        "E interact beside A / R / L    H medkit    F scan    J evidence",
+                        "E interact   H medkit   F scan  G analyze  Q pulse   I equip   J evidence",
                         217.,
                         471.,
                         18.,
@@ -1329,7 +1405,7 @@ async fn main() {
                         CORAL,
                     );
                     wrapped(c.question, 217., 270., 80, 24., AMBER, 2);
-                    wrapped("Accepted: power recharged to full, Custodians +2. Rejected: the terminal drains 2 power and locks, Custodians -1. The answer is written in one of this floor's records. Yours are damaged: ECHO can read them back to you.", 217., 340., 92, 17., MUTED, 4);
+                    wrapped("Accepted: power recharged to full, Custodians +2. Rejected: it drains 2 power, locks and alerts the floor, Custodians -1. The answer is written in one of this floor's records. Yours are damaged: ECHO can read them back to you.", 217., 340., 92, 17., MUTED, 4);
                     let mut pick = None;
                     for (i, o) in c.options.iter().enumerate() {
                         if button(
