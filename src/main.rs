@@ -12,7 +12,7 @@ use the_last_signal::{
         TerminalState, Tile, ANALYZE_COST, CHALLENGES, FLOORS, FLOOR_NAMES, FRAGMENT_BASE, HEIGHT,
         PULSE_COST, RECORD_AUTHORS, SCAN_COST, WIDTH,
     },
-    save,
+    profile, save,
 };
 
 /// "Test all" skips models larger than this (loading many big models at once can
@@ -398,6 +398,7 @@ enum Screen {
     NewConfirm,
     Terminal,
     Transmit,
+    Records,
 }
 struct Pending {
     rx: Receiver<Result<String, String>>,
@@ -498,6 +499,9 @@ async fn main() {
     let mut hurt_at = -1.0f64;
     // Set once the current run's end has been dealt with (save retired, run recorded).
     let mut run_recorded = false;
+    let mut history = profile::load();
+    // What the end screen says about this run against the history.
+    let mut end_note = String::new();
     loop {
         // from_display_rect is y-up in macroquad 0.4; the UI is laid out y-down.
         let mut camera = Camera2D::from_display_rect(Rect::new(0., 0., 1280., 800.));
@@ -682,6 +686,25 @@ async fn main() {
             // One life: an earlier save of this run cannot bring it back.
             if save::retire_if_same_run(&path, g.seed) {
                 status = "Expedition over. Its save file has been retired.".into();
+            }
+            let previous_best = history.best().map_or(0, |r| r.score);
+            if let Some(run) =
+                history.record(&g, &profile::date_of(macroquad::miniquad::date::now()))
+            {
+                end_note = if run.score > previous_best && history.runs.len() > 1 {
+                    format!("New best score (previous {previous_best}).")
+                } else if history.runs.len() == 1 {
+                    "First expedition recorded.".into()
+                } else {
+                    format!(
+                        "Best so far {}. Run {} recorded.",
+                        previous_best.max(run.score),
+                        history.runs.len()
+                    )
+                };
+                if let Err(e) = profile::store(&history) {
+                    end_note = format!("Run not recorded: {e}");
+                }
             }
         }
         let map_t = get_time();
@@ -1051,7 +1074,19 @@ async fn main() {
                     {
                         screen = Screen::Loadout;
                     }
-                    wrapped(&status, 217., 652., 92, 17., MUTED, 2);
+                    if button("RECORDS / R", Rect::new(460., 591., 180., 36.), true)
+                        || is_key_pressed(KeyCode::R)
+                    {
+                        screen = Screen::Records;
+                    }
+                    text(
+                        &history.headline(profile::day_of(macroquad::miniquad::date::now())),
+                        217.,
+                        645.,
+                        15.,
+                        TEAL,
+                    );
+                    wrapped(&status, 217., 665., 92, 16., MUTED, 2);
                 }
                 Screen::Console => {
                     let busy = console_rx.is_some();
@@ -1456,6 +1491,55 @@ async fn main() {
                         screen = Screen::Game;
                     }
                 }
+                Screen::Records => {
+                    text("EXPEDITION RECORDS", 217., 185., 34., LIGHT);
+                    text(
+                        &history.headline(profile::day_of(macroquad::miniquad::date::now())),
+                        217.,
+                        218.,
+                        16.,
+                        TEAL,
+                    );
+                    if history.runs.is_empty() {
+                        text(
+                            "Finish an expedition, won or lost, and it is recorded here.",
+                            217.,
+                            262.,
+                            17.,
+                            MUTED,
+                        );
+                    }
+                    for (i, r) in history.runs.iter().rev().take(16).enumerate() {
+                        text(
+                            &r.line(),
+                            217.,
+                            262. + i as f32 * 22.,
+                            15.,
+                            if r.won { LIGHT } else { MUTED },
+                        );
+                    }
+                    text(
+                        if DEMO {
+                            "Kept in this browser's local storage."
+                        } else {
+                            "Kept in profile.json beside your save."
+                        },
+                        217.,
+                        632.,
+                        14.,
+                        MUTED,
+                    );
+                    if button("BACK / ESC", Rect::new(217., 645., 200., 36.), true)
+                        || is_key_pressed(KeyCode::Escape)
+                        || is_key_pressed(KeyCode::Enter)
+                    {
+                        screen = if g.turn == 0 {
+                            Screen::Title
+                        } else {
+                            Screen::Pause
+                        };
+                    }
+                }
                 Screen::Transmit => {
                     text("THE VAULT LIFT", 217., 185., 34., LIGHT);
                     text("CHOOSE THE LAST SIGNAL", 217., 216., 17., TEAL);
@@ -1640,10 +1724,11 @@ async fn main() {
                 text(l, 212., 318. + i as f32 * 24., 17., LIGHT);
             }
             wrapped(&summary.lines[3], 212., 398., 55, 16., MUTED, 2);
+            text(&end_note, 212., 448., 15., TEAL);
             wrapped(
                 "You can still talk to ECHO. ESC opens the menu.",
                 212.,
-                450.,
+                472.,
                 55,
                 15.,
                 MUTED,
