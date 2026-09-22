@@ -149,13 +149,21 @@ pub enum EnemyKind {
     Sentinel,
     Hunter,
     Overseer,
+    /// Frail and sharp-eyed: it notices you from its full sight even when idle.
+    Drone,
+    /// Bolted down. It never moves, but it fires at anything alert within range.
+    Turret,
 }
+/// A turret fires at you from this far, in line of sight.
+pub const TURRET_RANGE: i32 = 3;
 impl EnemyKind {
     pub fn name(self) -> &'static str {
         match self {
             EnemyKind::Sentinel => "Sentinel",
             EnemyKind::Hunter => "Hunter",
             EnemyKind::Overseer => "Overseer",
+            EnemyKind::Drone => "Drone",
+            EnemyKind::Turret => "Turret",
         }
     }
     pub fn glyph(self) -> &'static str {
@@ -163,20 +171,35 @@ impl EnemyKind {
             EnemyKind::Sentinel => "S",
             EnemyKind::Hunter => "H",
             EnemyKind::Overseer => "O",
+            EnemyKind::Drone => "D",
+            EnemyKind::Turret => "T",
         }
     }
     pub fn damage(self) -> i32 {
         match self {
-            EnemyKind::Sentinel => 1,
+            EnemyKind::Sentinel | EnemyKind::Drone | EnemyKind::Turret => 1,
             _ => 2,
         }
     }
-    /// How far an alert one sees you. At its post it notices you 2 tiles later.
+    /// How far an alert one sees you. At its post it notices you `grace` tiles later.
     pub fn sight(self) -> i32 {
         match self {
             EnemyKind::Sentinel => 7,
+            EnemyKind::Drone => 11,
+            EnemyKind::Turret => 6,
             _ => 9,
         }
+    }
+    /// How much closer you can get to an unwary one before it notices you.
+    pub fn grace(self) -> i32 {
+        match self {
+            EnemyKind::Drone => 0,
+            _ => 2,
+        }
+    }
+    /// True for foes that walk.
+    pub fn mobile(self) -> bool {
+        self != EnemyKind::Turret
     }
     /// Health grows with depth for the first three floors, then holds: the
     /// deeper floors get harder through who is there, not through hit points.
@@ -186,11 +209,18 @@ impl EnemyKind {
             EnemyKind::Sentinel => 6 + depth,
             EnemyKind::Hunter => 6 + depth,
             EnemyKind::Overseer => 16,
+            EnemyKind::Drone => 4,
+            EnemyKind::Turret => 8,
         }
     }
-    /// The Overseer is heavy: it closes in only every other turn (it still strikes every turn).
+    /// The Overseer is heavy: it closes in only every other turn (it still
+    /// strikes every turn). A turret never moves.
     fn advances(self, turn: u32) -> bool {
-        self != EnemyKind::Overseer || turn.is_multiple_of(2)
+        match self {
+            EnemyKind::Overseer => turn.is_multiple_of(2),
+            EnemyKind::Turret => false,
+            _ => true,
+        }
     }
 }
 /// What a foe currently believes about you.
@@ -296,7 +326,17 @@ pub enum PickupKind {
     Medkit,
     /// An optional record lying loose: this floor's data fragment.
     Fragment,
+    /// A beacon you carry and drop (B): nearby units converge on where it fell.
+    Decoy,
+    /// +4 power, but the surge is heard: nearby units are alerted.
+    Overcharge,
 }
+pub const MAX_DECOYS: u32 = 2;
+pub const OVERCHARGE_POWER: u32 = 4;
+/// A dropped decoy is heard this far.
+pub const DECOY_RANGE: i32 = 10;
+/// An overcharge surge is heard this far.
+pub const SURGE_RANGE: i32 = 6;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Pickup {
     pub pos: Pos,
@@ -526,6 +566,7 @@ pub enum Action {
     Unfit(Module),
     Answer(usize),
     Transmit(Signal),
+    Decoy,
 }
 #[derive(Clone, Debug)]
 pub struct Summary {
@@ -621,6 +662,9 @@ pub struct Game {
     pub predictable: bool,
     #[serde(default)]
     pub difficulty: Difficulty,
+    /// Decoy beacons carried.
+    #[serde(default)]
+    pub decoys: u32,
 }
 struct Rng(u64);
 impl Rng {
@@ -685,6 +729,7 @@ impl Game {
             reinforcements: 0,
             predictable: false,
             difficulty,
+            decoys: 0,
         };
         g.build_floor(0);
         g
@@ -794,6 +839,22 @@ impl Game {
                 self.foe_hp(EnemyKind::Hunter),
             ));
         }
+        // A drone patrols the stacks and the ring, and a turret covers the
+        // ring's relay. The vault is the Overseer's.
+        if (2..FLOORS - 1).contains(&floor) {
+            self.enemies.push(Enemy::new(
+                centers[others[2]].offset(-2, -1),
+                EnemyKind::Drone,
+                self.foe_hp(EnemyKind::Drone),
+            ));
+        }
+        if floor == 3 {
+            self.enemies.push(Enemy::new(
+                centers[relay_room].offset(0, -2),
+                EnemyKind::Turret,
+                self.foe_hp(EnemyKind::Turret),
+            ));
+        }
         // The Overseer guards the final relay.
         if floor == FLOORS - 1 {
             self.enemies.push(Enemy::new(
@@ -822,12 +883,21 @@ impl Game {
         });
         // Supplies sit in room corners, off the direct line between doors: two
         // power cells and a medkit per floor, never in the lift room.
-        for kind in [
+        let mut kinds = vec![
             PickupKind::PowerCell,
             PickupKind::PowerCell,
             PickupKind::Medkit,
             PickupKind::Fragment,
-        ] {
+        ];
+        if floor >= 1 {
+            kinds.push(PickupKind::Decoy);
+        }
+        if floor >= 2 {
+            // Deeper floors are busier, and better stocked.
+            kinds.push(PickupKind::Overcharge);
+            kinds.push(PickupKind::Medkit);
+        }
+        for kind in kinds {
             for _ in 0..40 {
                 let room = rng.range(0, 6) as usize;
                 let (x, y, w, h) = rooms[room];
@@ -988,6 +1058,7 @@ impl Game {
             Action::Unfit(m) => self.unfit(m),
             Action::Answer(i) => self.answer(i),
             Action::Transmit(s) => self.transmit(s),
+            Action::Decoy => self.decoy(),
         }
     }
     pub fn replay(
@@ -1114,6 +1185,23 @@ impl Game {
                 self.medkits += 1;
                 self.log("pickup", "Picked up a medkit.");
             }
+            PickupKind::Decoy if self.decoys < MAX_DECOYS => {
+                self.decoys += 1;
+                self.log(
+                    "pickup",
+                    "Picked up a decoy beacon. Press B to drop it: nearby units converge on that tile.",
+                );
+            }
+            PickupKind::Overcharge if self.energy < MAX_ENERGY => {
+                self.energy = (self.energy + OVERCHARGE_POWER).min(MAX_ENERGY);
+                let heard = self.rouse(self.player, SURGE_RANGE);
+                self.log(
+                    "surge",
+                    &format!(
+                        "Overcharge cell: +{OVERCHARGE_POWER} power. The surge is heard: {heard} unit(s) alerted."
+                    ),
+                );
+            }
             PickupKind::Fragment => {
                 let id = FRAGMENT_BASE + self.floor;
                 if !self.records_found.contains(&id) {
@@ -1135,6 +1223,40 @@ impl Game {
             }
         }
         self.pickups[i].taken = true;
+    }
+    /// Every mobile, non-passive unit within `range` of `at` becomes alert and
+    /// heads for that tile. Returns how many were roused.
+    fn rouse(&mut self, at: Pos, range: i32) -> u32 {
+        let mut n = 0;
+        for e in &mut self.enemies {
+            if !e.passive && e.kind.mobile() && e.pos.distance(at) <= range {
+                e.awareness = Awareness::Alert;
+                e.last_seen = Some(at);
+                e.patience = 0;
+                e.flank = None;
+                n += 1;
+            }
+        }
+        n
+    }
+    /// Drop a decoy beacon where you stand. Units nearby converge on this
+    /// tile, so leave it: that is the whole trick.
+    pub fn decoy(&mut self) {
+        if self.outcome != Outcome::Exploring {
+            return;
+        }
+        if self.decoys == 0 {
+            self.log("status", "No decoy beacon to drop.");
+            return;
+        }
+        self.record(Action::Decoy);
+        self.decoys -= 1;
+        let drawn = self.rouse(self.player, DECOY_RANGE);
+        self.log(
+            "decoy",
+            &format!("Decoy beacon dropped: {drawn} unit(s) converge on this tile. Move."),
+        );
+        self.finish_turn();
     }
     pub fn wait(&mut self) {
         if self.outcome == Outcome::Exploring {
@@ -1299,8 +1421,8 @@ impl Game {
     }
     fn descend(&mut self) {
         self.floor += 1;
-        self.hp = (self.hp + 10).min(MAX_HP);
-        self.medkits = (self.medkits + 1).min(MAX_MEDKITS);
+        self.hp = (self.hp + 12).min(MAX_HP);
+        self.medkits = (self.medkits + 2).min(MAX_MEDKITS);
         self.energy = START_ENERGY;
         self.turn += 1;
         let f = self.floor;
@@ -1314,7 +1436,7 @@ impl Game {
         self.log(
             "descend",
             &format!(
-                "Rest bay: +10 health, +1 medkit, power restored. {} module slots open.",
+                "Rest bay: +12 health, +2 medkits, power restored. {} module slots open.",
                 slots
             ),
         );
@@ -1602,6 +1724,9 @@ impl Game {
     /// Move foe `i` one tile down a distance map, if a free tile gets it closer.
     /// Ties go to the tile farthest from `avoid`, so a foe can slip past you.
     fn advance_by(&mut self, i: usize, dist: &[u16], avoid: Option<Pos>) {
+        if !self.enemies[i].kind.mobile() {
+            return;
+        }
         let p = self.enemies[i].pos;
         let here = dist[Self::index(p).unwrap()];
         let leash = (self.enemies[i].kind == EnemyKind::Sentinel)
@@ -1945,7 +2070,7 @@ impl Game {
             let reach = if awareness == Awareness::Alert {
                 kind.sight()
             } else {
-                kind.sight() - 2
+                kind.sight() - kind.grace()
             };
             let edge = p.distance(self.player) == reach && awareness != Awareness::Alert;
             // At the very edge of its sight an unwary guard sometimes misses you.
@@ -1988,7 +2113,12 @@ impl Game {
                     }
                 }
                 self.enemies[i].retreating = false;
-                if p.distance(self.player) == 1 {
+                // A turret needs a turn to recharge between shots.
+                let in_reach = p.distance(self.player) == 1
+                    || kind == EnemyKind::Turret
+                        && p.distance(self.player) <= TURRET_RANGE
+                        && self.turn.is_multiple_of(2);
+                if in_reach {
                     if self.has(Module::Shield) && self.energy > 0 {
                         self.energy -= 1;
                         self.log(
@@ -2120,8 +2250,8 @@ impl Game {
         }
         if p == self.player {
             return Some(format!(
-                "You: {}/{MAX_HP} HP, {} medkits, {} power.",
-                self.hp, self.medkits, self.energy
+                "You: {}/{MAX_HP} HP, {} medkits, {} power, {} decoys.",
+                self.hp, self.medkits, self.energy, self.decoys
             ));
         }
         if let Some(e) = self.enemies.iter().find(|e| e.pos == p && self.can_see(p)) {
@@ -2204,6 +2334,13 @@ impl Game {
                 PickupKind::Fragment => {
                     "Data fragment: an optional record, off the main path.".into()
                 }
+                PickupKind::Decoy => {
+                    "Decoy beacon: carry it, drop it with B, and nearby units converge there."
+                        .into()
+                }
+                PickupKind::Overcharge => format!(
+                    "Overcharge cell: +{OVERCHARGE_POWER} power, but the surge alerts nearby units."
+                ),
             });
         }
         None
@@ -2257,6 +2394,16 @@ impl Game {
         {
             return Some(
                 "Foe adjacent: bump it to strike for 3, or 6 if it has not noticed you. Sentinels hit for 1, others for 2.",
+            );
+        }
+        if self.decoys > 0
+            && self
+                .enemies
+                .iter()
+                .any(|e| e.awareness == Awareness::Alert && self.can_see(e.pos) && !e.passive)
+        {
+            return Some(
+                "Alert foe in sight and a decoy in hand: press B to drop it, then walk away round a corner.",
             );
         }
         if self.hp <= 10 && self.medkits > 0 {
@@ -2487,7 +2634,7 @@ impl Game {
             || self.hp > MAX_HP
             || self.medkits > MAX_MEDKITS
             || self.energy > MAX_ENERGY
-            || self.enemies.len() > 12
+            || self.enemies.len() > 16
             || self.floor >= FLOORS
             || self.archives.len() != 3
         {
@@ -2532,6 +2679,7 @@ impl Game {
             || self.caches.len() > 2
             || self.caches.iter().any(|c| !self.floor(c.pos))
             || self.pickups.len() > 8
+            || self.decoys > MAX_DECOYS
             || self.pickups.iter().any(|p| !self.floor(p.pos))
             || self.terminal.as_ref().is_some_and(|t| !self.floor(t.pos))
             || self
@@ -2702,7 +2850,7 @@ mod tests {
         g.player = g.lift;
         g.interact();
         assert_eq!((g.floor, g.outcome), (1, Outcome::Exploring));
-        assert_eq!((g.hp, g.medkits, g.energy), (20, 4, START_ENERGY));
+        assert_eq!((g.hp, g.medkits, g.energy), (22, 5, START_ENERGY));
         assert_eq!((g.kills, g.standing.len()), (2, 2));
         assert!(g.standing[0] >= 2, "faction standing carries over");
         assert!(!g.restored && g.archives.iter().all(|a| !a.recovered));
@@ -2732,6 +2880,26 @@ mod tests {
         assert_eq!(kinds[2], (3, 1, 0, 8));
         assert_eq!(kinds[3], (3, 2, 0, 8));
         assert_eq!(kinds[4], (3, 2, 1, 8));
+        let count = |g: &Game, k| g.enemies.iter().filter(|e| e.kind == k).count();
+        for floor in 0..FLOORS {
+            let mut g = Game::new(21);
+            g.floor = floor;
+            g.build_floor(floor);
+            assert_eq!(
+                count(&g, EnemyKind::Drone),
+                usize::from((2..FLOORS - 1).contains(&floor)),
+                "floor {floor}"
+            );
+            assert_eq!(
+                count(&g, EnemyKind::Turret),
+                usize::from(floor == 3),
+                "floor {floor}"
+            );
+            let has = |k| g.pickups.iter().any(|p| p.kind == k);
+            assert_eq!(has(PickupKind::Decoy), floor >= 1);
+            assert_eq!(has(PickupKind::Overcharge), floor >= 2);
+            g.validate().unwrap();
+        }
     }
     #[test]
     fn hunters_hit_harder_and_the_overseer_is_slow() {
@@ -3160,6 +3328,78 @@ mod tests {
         g.enemies
             .push(Enemy::new(g.player.offset(dx, dy), kind, hp));
         g.enemies.len() - 1
+    }
+    #[test]
+    fn a_drone_notices_from_its_full_sight_and_a_turret_fires_without_moving() {
+        let mut g = arena();
+        let d = foe(&mut g, 10, 0, EnemyKind::Drone, 4);
+        g.wait();
+        assert_eq!(
+            g.enemies[d].awareness,
+            Awareness::Alert,
+            "no grace at 10 tiles"
+        );
+        let mut g = arena();
+        let s = foe(&mut g, 6, 0, EnemyKind::Sentinel, 6);
+        g.wait();
+        assert_eq!(
+            g.enemies[s].awareness,
+            Awareness::Idle,
+            "a sentinel has 2 tiles of grace"
+        );
+        let mut g = arena();
+        let t = foe(&mut g, 3, 0, EnemyKind::Turret, 8);
+        let post = g.enemies[t].pos;
+        g.wait();
+        assert_eq!(g.enemies[t].awareness, Awareness::Alert);
+        assert_eq!(g.hp, 24, "noticing takes its turn");
+        g.wait();
+        g.wait();
+        assert_eq!(
+            g.hp, 23,
+            "fired once from 3 tiles: it recharges between shots"
+        );
+        g.step(-1, 0);
+        g.wait();
+        assert_eq!(
+            (g.hp, g.enemies[t].pos),
+            (23, post),
+            "out of range, never moves"
+        );
+        g.decoys = 1;
+        g.decoy();
+        assert_eq!(g.enemies[t].pos, post, "a decoy does not move a turret");
+    }
+    #[test]
+    fn a_decoy_draws_nearby_units_to_where_it_fell_and_a_surge_alerts_them() {
+        let mut g = arena();
+        let s = foe(&mut g, 0, 8, EnemyKind::Sentinel, 6);
+        g.enemies[s].awareness = Awareness::Idle;
+        assert_eq!(g.decoys, 0);
+        g.decoy();
+        assert_eq!(g.turn, 0, "nothing to drop, no turn spent");
+        g.decoys = 1;
+        let here = g.player;
+        g.decoy();
+        assert_eq!((g.decoys, g.turn), (0, 1));
+        assert_eq!(g.enemies[s].awareness, Awareness::Alert);
+        assert_eq!(g.enemies[s].last_seen, Some(here));
+        assert_eq!(g.actions.last(), Some(&Action::Decoy), "logged for replay");
+        let mut g = arena();
+        let s = foe(&mut g, 0, -5, EnemyKind::Sentinel, 6);
+        g.pickups.push(Pickup {
+            pos: g.player.offset(1, 0),
+            kind: PickupKind::Overcharge,
+            taken: false,
+        });
+        g.energy = 2;
+        g.step(1, 0);
+        assert_eq!(g.energy, 2 + OVERCHARGE_POWER);
+        assert_eq!(
+            g.enemies[s].awareness,
+            Awareness::Alert,
+            "the surge was heard"
+        );
     }
     #[test]
     fn a_wounded_sentinel_falls_back_towards_an_ally() {

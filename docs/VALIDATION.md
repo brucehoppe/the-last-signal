@@ -74,3 +74,11 @@ Screens checked in a real window: HUD on floor 2 (floor label, module costs, Ana
 ## Five-floor balance (2026-09-22)
 
 Two floors were added between the Coolant Levels and the Signal Vault: the Archive Stacks and the Reactor Ring, each with three records, a terminal challenge and a fragment. With hunters simply growing by one per floor and foe health growing with depth, the planner won 10 of 100 and died on the last two floors. Capping foe health at the floor-3 value, giving the stacks one hunter and the ring and vault two, and raising the rest-bay heal from 8 to 10 brought it to 78 of 100, every death in the vault. Saves from the three-floor prototype (version 3) are refused with a message, because record ids changed meaning.
+
+## Foe and item variety (2026-09-22)
+
+Drones on floors 3 and 4, a turret at the ring relay, decoy beacons and overcharge cells dropped the planner to 24 of 100 at first (turret firing every turn, drones everywhere, a vault turret). Turrets now recharge between shots and guard only the ring; drones stay off the vault. Measured one at a time, the drone cost the planner about ten wins and the turret about four; the overcharge cell none, since the planner never walks the corners where supplies lie. Extra medkits in corners did not help it for the same reason. Two medkits at each rest bay (instead of one) restored 78 of 100, all deaths in the vault. The planner still uses none of the new tools.
+
+## Screens checked in a real window (2026-09-22)
+
+New-expedition screen (difficulty row, seed field), title screen with the records line, hovering a cache tile ("Cache: holds a Scanner Array."), auto-explore walking seven turns and halting on a sentinel, the end screen with COPY RECAP and WATCH REPLAY, and the replay screen running to FINISHED. Not checked by hand: clicking a tile to walk (same code path as auto-explore), a drone or turret in play, dropping a decoy.

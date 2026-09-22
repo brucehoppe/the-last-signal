@@ -348,6 +348,8 @@ fn draw_map(g: &Game, route: &[Pos]) {
             PickupKind::PowerCell => ("*", AMBER),
             PickupKind::Medkit => ("+", Color::new(0.55, 0.9, 0.5, 1.)),
             PickupKind::Fragment => ("f", LIGHT),
+            PickupKind::Decoy => ("b", TEAL),
+            PickupKind::Overcharge => ("%", CORAL),
         };
         text(
             glyph,
@@ -367,6 +369,8 @@ fn draw_map(g: &Game, route: &[Pos]) {
                 EnemyKind::Sentinel => CORAL,
                 EnemyKind::Hunter => AMBER,
                 EnemyKind::Overseer => Color::new(0.85, 0.5, 0.95, 1.),
+                EnemyKind::Drone => Color::new(0.55, 0.75, 0.98, 1.),
+                EnemyKind::Turret => Color::new(0.95, 0.55, 0.55, 1.),
             },
         );
     }
@@ -628,11 +632,16 @@ async fn main() {
         );
         text(
             &format!(
-                "HP {:02}/24  MEDKITS {}  POWER {}  KEYS {}/3",
+                "HP {:02}/24  MEDKITS {}  POWER {}  KEYS {}/3{}",
                 g.hp,
                 g.medkits,
                 g.energy,
-                g.recovered()
+                g.recovered(),
+                if g.decoys > 0 {
+                    format!("  DECOYS {}", g.decoys)
+                } else {
+                    String::new()
+                }
             ),
             465.,
             48.,
@@ -700,6 +709,8 @@ async fn main() {
                 "shield" => Some(("ABSORBED", TEAL)),
                 "pickup" => Some(("SUPPLIES", TEAL)),
                 "pulse" => Some(("PULSE", TEAL)),
+                "decoy" => Some(("DECOY", TEAL)),
+                "surge" => Some(("SURGE", CORAL)),
                 "alert" => Some(("SPOTTED", CORAL)),
                 "retreat" => Some(("FALLING BACK", AMBER)),
                 "reinforce" => Some(("REINFORCED", CORAL)),
@@ -783,7 +794,7 @@ async fn main() {
         match &looked {
             Some((_, d)) => text(d, 28., 672., 15., LIGHT),
             None => text(
-                "ARCHIVE A  RELAY R  LIFT L  CACHE C  TERMINAL T  FRAGMENT f  POWER *  MEDKIT +  FOE S H O  /  hover: look",
+                "ARCHIVE A  RELAY R  LIFT L  CACHE C  TERMINAL T  FRAGMENT f  POWER * %  MEDKIT +  DECOY b  FOE S H D T O  /  hover: look",
                 28.,
                 672.,
                 13.,
@@ -803,7 +814,7 @@ async fn main() {
         match g.hint() {
             Some(h) => text(&format!("> {h}"), 28., 788., 16., AMBER),
             None => text(
-                "WASD move  E interact  H heal  F scan  G analyze  Q pulse  I equip  SPACE wait  O explore  J journal  click map: walk",
+                "WASD move  E interact  H heal  F scan  G analyze  Q pulse  B decoy  I equip  SPACE wait  O explore  J journal  click: walk",
                 28.,
                 788.,
                 14.,
@@ -1016,6 +1027,8 @@ async fn main() {
                     g.pulse();
                 } else if is_key_pressed(KeyCode::Space) {
                     g.wait();
+                } else if is_key_pressed(KeyCode::B) {
+                    g.decoy();
                 }
                 if is_key_pressed(KeyCode::I) {
                     screen = Screen::Equip;

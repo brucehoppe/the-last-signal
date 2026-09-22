@@ -36,6 +36,10 @@ Establish a reliable local desktop build with real Ollama on the user's laptop. 
 
 Looping floors, guard awareness, ambushes, the Pulse Emitter, supplies, damaged records that ECHO reconstructs, Custodian terminals, truces and lockdowns, data fragments, a choice of last signal, scores and a daily seed are all implemented and tested (see docs/DESIGN.md). `--preview N` (1 game, 2 journal, 3 terminal, 4 transmit, 5 equipment, 6 new expedition, 7 a lost run with its end screen and replay) opens a screen directly for layout checks. Still to verify by hand: a full run with a real Ollama model, including asking it to read a damaged record and to answer a terminal.
 
+## State after the second gameplay pass (2026-09-22)
+
+Five floors, three difficulties with seed entry, one-life saves, a run history (`src/profile.rs`, `web/storage.js`), recap and morgue files, look/walk/explore, a replay screen, drones, a turret, decoy beacons and overcharge cells. See docs/DESIGN.md and docs/VALIDATION.md. Not yet hand-played: a drone or turret encounter and a decoy drop.
+
 ## Suggested next task
 
 Improve the companion chat UI: width-aware wrapping, longer multiline input, keyboard focus indication, retry-last-question, and request cancellation. Keep the game usable while requests run. Add a small number of tests for actual failure risks, not implementation-mirroring tests.

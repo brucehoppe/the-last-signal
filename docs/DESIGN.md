@@ -32,6 +32,18 @@ The first playable slice was a fixed chain of rooms with flat bump combat, an em
 - **The ending is a choice.** `Signal` options gated by trust and by optional data fragments, one of which recasts ECHO itself.
 - **Reasons to replay.** A score and a shared daily seed.
 
+## Added in the second gameplay pass (2026-09-22)
+
+A review against roguelike conventions found the game complete inside a run and thin around it. This pass added, in order:
+
+- **One life.** `save::retire` moves a loaded save aside; `save::retire_if_same_run` does the same when the run it belongs to ends; `save::read` refuses finished runs.
+- **Difficulty and seed entry.** `Difficulty` (Gentle, Standard, Hard) lives on the game, in the save and in `Game::replay`; it changes `Game::foe_hp`, mans an extra post on Hard, and scales the score. The new-expedition screen takes a typed seed.
+- **Five floors.** The Archive Stacks and the Reactor Ring, with their own records, challenges, fragments and notes. Foe health stops growing after floor 3.
+- **A run history.** `profile.rs` records every finished run and derives best, wins and the daily result; it is a record, never an input to the rules.
+- **Recap and replay.** `Game::recap` for sharing, a morgue file on desktop, and a replay screen that re-runs the action log on a fresh game.
+- **Look, walk, explore.** `Game::describe` (discovered and in sight only), `Game::frontier`, and a walking loop in the UI that steps through ordinary moves so the log stays exact.
+- **Variety.** Drones (no idle grace) and a turret (stationary, ranged, recharges between shots); decoy beacons (`Game::decoy`, `Game::rouse`) and overcharge cells. Each new threat was measured against the planner and paid for with two rest-bay medkits rather than by weakening it.
+
 The difficulty band test (`tests/expedition.rs`) was kept honest throughout: the omniscient, charge-everything planner wins 78 of 100 seeds on five floors (86 of 100 when there were three). It never uses stealth, pulses, terminals or truces, so it is a floor for player skill.
 
 ## Roadmap

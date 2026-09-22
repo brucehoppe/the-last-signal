@@ -4,7 +4,7 @@
 
 ![The Last Signal: exploring the Surface Complex with ECHO, the local AI companion](docs/screenshot.png)
 
-**[Try it in your browser](https://brucehoppe.github.io/the-last-signal/)**: a WebAssembly build of the real game. ECHO is a built-in script there and saving is off; the desktop build talks to a real local model through Ollama.
+**[Try it in your browser](https://brucehoppe.github.io/the-last-signal/)**: a WebAssembly build of the real game. ECHO is a built-in script there and saving is off (your run history stays in the browser); the desktop build talks to a real local model through Ollama.
 
 An original Rust expedition roguelike with an optional local-LLM companion.
 
@@ -18,12 +18,16 @@ Start with **[START-HERE.md](START-HERE.md)**. No reference repositories need to
 
 - **Five floors** (The Surface Complex, The Coolant Levels, The Archive Stacks, The Reactor Ring, The Signal Vault), each six procedural rooms joined into **loops**, so there is more than one way round a guard. The lift, relay, archive and cache rooms are shuffled per seed.
 - **A reason to talk to ECHO.** Records come out of the failing archives *damaged*, with their longer words burned out. Only ECHO holds the full text: ask it what a record says and the journal shows it whole, along with ECHO's note on what it means for you. Each floor has a one-attempt **Custodian terminal** whose answer is written in that floor's records (right: full power and Custodian trust; wrong: drained power and an alerted floor). The ECHO panel offers **one-click questions**, and asking the way draws a **game-computed route** on the map. If Ollama is down, ECHO answers from its built-in script instead of failing.
-- **Guards with awareness**: foes notice you later when idle at their posts, signal nearby units, path round corners, chase to where they last saw you, search, then walk home. Sentinels are leashed to their posts; Hunters track you briefly out of sight; the Overseer is slow and heavy. Break line of sight to lose them. Guards also **flank** when two are alert, sentinels **hold corridors** and **fall back** when hurt, hunters **sweep** rooms while searching, guards **remember where you ambushed** a unit, and the Overseer **calls reinforcements**. Each guard has its own seeded habits, so the rules are hard to memorise, yet every run still replays exactly.
+- **Guards with awareness**: foes notice you later when idle at their posts, signal nearby units, path round corners, chase to where they last saw you, search, then walk home. Sentinels are leashed to their posts; Hunters track you briefly out of sight; the Overseer is slow and heavy; **Drones** (floors 3 and 4) are frail but see far and give no grace; a **Turret** by the Reactor Ring relay never moves and fires every other turn at anything within 3 tiles. Break line of sight to lose them. Guards also **flank** when two are alert, sentinels **hold corridors** and **fall back** when hurt, hunters **sweep** rooms while searching, guards **remember where you ambushed** a unit, and the Overseer **calls reinforcements**. Each guard has its own seeded habits, so the rules are hard to memorise, yet every run still replays exactly.
 - **Ambushes**: striking a foe that is not alert to you, or is stunned, does 6 instead of 3. Wait round a corner for a searching foe.
-- **Four power modules** found in caches (one per floor, a slot opens per floor): Scanner Array, Shield Cell, Field Analyzer and the **Pulse Emitter** (stuns foes in sight). All draw on one power pool; **power cells** and **medkits** lie in room corners.
+- **Four power modules** found in caches (one per floor, a slot opens per floor): Scanner Array, Shield Cell, Field Analyzer and the **Pulse Emitter** (stuns foes in sight). All draw on one power pool; **power cells** and **medkits** lie in room corners, along with **decoy beacons** (drop one with B and nearby units converge on that tile while you leave) and **overcharge cells** (+4 power, but the surge alerts units nearby).
 - **Standing that matters**: disabling foes costs Custodian trust; reading a faction's records and answering terminals earns it. Restore a relay in good standing and the Custodians' units **stand down** for your walk back; in bad standing the floor **locks down** and hunters deploy at the lift.
 - **Optional data fragments**, one per floor, off the main path. The last one tells ECHO what it really is.
 - **A choice of last signal** at the vault lift: a distress call, a Warden authorisation (needs Custodian trust) or ECHO's testimony (needs every fragment), each with its own rank and epilogue. Runs are **scored**, and a **daily signal** gives everyone the same seed for the day.
+- **Three difficulties** (Gentle, Standard, Hard) and a **typed seed** on the new-expedition screen, so a run can be shared by number. Difficulty is part of the seed's replay.
+- **One life.** Loading a save uses it up, and a run that ends retires its own save, so death cannot be undone by reloading.
+- **A run history**: best score, runs, wins and today's daily result on the title screen, a RECORDS screen of recent runs (`profile.json` beside the save, or the browser's local storage in the demo), and on the end screen **COPY RECAP** (a shareable text, plus a morgue file on desktop) and **WATCH REPLAY**, which plays the run again from its action log.
+- **Look, walk and explore**: hover a map tile to see what you know about it (foe health and awareness, what a cache holds); click a known tile to walk there; press O to explore the nearest loose edge of the known map. Walking halts the moment a foe is in sight.
 - Contextual onboarding hints, threat halos, awareness markers (! alert, ? searching, z stunned, - stood down), floating hit feedback and power costs on the HUD.
 - A deterministic **action log**: every run replays from its seed, loadout and actions (`Game::replay_matches`).
 - An **AI console** (title menu, or C) that lists your installed Ollama models, benchmarks them against this game's grounding rules, and saves your pick to `config.json`.
@@ -44,7 +48,7 @@ cargo run --locked --release
 For a repeatable expedition:
 
 ```sh
-cargo run --locked --release -- --seed 42
+cargo run --locked --release -- --seed 42 --difficulty hard
 ```
 
 On Windows, use `run.cmd` after installing the prerequisites in START-HERE.
@@ -87,10 +91,16 @@ Open the **AI console** from the title menu to see every installed model, test t
 | I | Equipment: fit or unfit found modules (costs a turn) |
 | G | Field Analyzer: spend 2 power to pinpoint the nearest unrecovered archive through walls |
 | Q | Pulse Emitter: spend 2 power to stun foes in sight within 3 tiles for 2 turns |
+| B | Drop a decoy beacon: nearby units converge on this tile |
+| O | Auto-explore the known map's nearest loose edge; any key stops |
+| Click a known map tile | Walk there by the known route; halts when a foe comes into sight |
+| Hover a map tile | Look: what you know about that tile, foe or item |
+| R (end screen) | Watch the run's replay; Space pauses, Right steps, + and - change speed |
+| R (title menu) | Expedition records |
 | M / C (title menu) | Starting-module choice / AI console |
 | Space | Wait one turn |
 | J | Open recovered evidence |
-| F5 / F9 | Save / load |
+| F5 / F9 | Save / load (a loaded save is used up; a finished run retires its save) |
 | Escape | Unfocus chat, close journal, or open pause menu |
 | Enter | Start/resume from menu, or submit focused chat |
 | Mouse wheel over chat | Scroll conversation |
