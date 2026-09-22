@@ -20,7 +20,7 @@ jobs:
       - run: cargo build --locked --release --target wasm32-unknown-unknown
       - run: |
           mkdir -p site
-          cp web/index.html web/gl.js web/gl.LICENSE-MIT web/sapp_jsutils.js web/storage.js site/
+          cp web/index.html web/gl.js web/gl.LICENSE-MIT web/storage.js site/
           cp target/wasm32-unknown-unknown/release/the-last-signal.wasm site/
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3

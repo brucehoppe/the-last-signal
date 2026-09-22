@@ -1210,7 +1210,9 @@ async fn main() {
                     {
                         screen = Screen::Loadout;
                     }
-                    if button("RECORDS / R", Rect::new(460., 591., 180., 36.), true)
+                    // Takes the AI console's place in the browser, where there is none.
+                    let records_x = if DEMO { 217. } else { 460. };
+                    if button("RECORDS / R", Rect::new(records_x, 591., 180., 36.), true)
                         || is_key_pressed(KeyCode::R)
                     {
                         screen = Screen::Records;

@@ -158,26 +158,41 @@ pub fn store(p: &Profile) -> Result<(), String> {
 }
 
 // In the browser the profile lives in localStorage, through a tiny plugin in
-// web/storage.js. If storage is blocked the demo simply forgets between visits.
+// web/storage.js that copies UTF-8 bytes in and out of wasm memory. If storage
+// is blocked the demo simply forgets between visits.
 #[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "env")]
 extern "C" {
-    fn last_signal_store_get() -> sapp_jsutils::JsObject;
-    fn last_signal_store_set(value: sapp_jsutils::JsObjectWeak);
+    /// Byte length of the stored profile, or 0 when there is none.
+    fn last_signal_store_len() -> u32;
+    /// Copy up to `cap` bytes of the stored profile to `ptr`; returns bytes copied.
+    fn last_signal_store_read(ptr: *mut u8, cap: u32) -> u32;
+    fn last_signal_store_write(ptr: *const u8, len: u32);
+}
+/// gl.js checks this against the plugin's `version` in web/storage.js.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn last_signal_storage_crate_version() -> u32 {
+    1
 }
 #[cfg(target_arch = "wasm32")]
 pub fn load() -> Profile {
-    let object = unsafe { last_signal_store_get() };
-    if object.is_nil() || object.is_undefined() {
+    let len = unsafe { last_signal_store_len() } as usize;
+    if len == 0 || len > 4_000_000 {
         return Profile::default();
     }
-    let mut s = String::new();
-    object.to_string(&mut s);
-    Profile::from_json(&s).unwrap_or_default()
+    let mut bytes = vec![0u8; len];
+    let got = unsafe { last_signal_store_read(bytes.as_mut_ptr(), len as u32) } as usize;
+    bytes.truncate(got.min(len));
+    std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(Profile::from_json)
+        .unwrap_or_default()
 }
 #[cfg(target_arch = "wasm32")]
 pub fn store(p: &Profile) -> Result<(), String> {
-    let value = sapp_jsutils::JsObject::string(&p.to_json());
-    unsafe { last_signal_store_set(value.weak()) };
+    let json = p.to_json();
+    unsafe { last_signal_store_write(json.as_ptr(), json.len() as u32) };
     Ok(())
 }
 

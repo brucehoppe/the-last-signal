@@ -7,7 +7,7 @@
 | src/core.rs | Deterministic generation, state, turn actions, visibility, objectives, validation, discovered knowledge |
 | src/ai.rs | Config, prompt construction, loopback HTTP, worker thread, schema validation |
 | src/save.rs | Save location, version envelope, bounded reads, atomic writes, validation, retiring used saves, morgue files |
-| src/profile.rs | Run history across expeditions: profile.json on desktop, localStorage in the browser (via web/storage.js and sapp-jsutils) |
+| src/profile.rs | Run history across expeditions: profile.json on desktop, localStorage in the browser (via web/storage.js) |
 | src/main.rs | Macroquad desktop window, map, HUD, chat, journal, menus, input |
 | src/lib.rs | Exposes the game services for headless tests |
 
