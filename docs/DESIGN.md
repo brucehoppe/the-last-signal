@@ -8,7 +8,7 @@ The player is an expedition operator inside an abandoned complex. ECHO is a dama
 
 ## Implemented slice
 
-Three floors of six rooms each, joined into loops. On every floor, three authored archive records unlock a relay; restore it, then return to the lift, which descends (or, on the last floor, offers a choice of transmission). Foes escalate: five sentinels on floor 1, then four plus a hunter, then three plus two hunters and an Overseer. Modules are found in caches, with one slot opening per floor. Health, medkits, and scanner energy supply limited resources. A seed reproduces the map. Victory and death both leave chat available for discussion.
+Five floors of six rooms each, joined into loops. On every floor, three authored archive records unlock a relay; restore it, then return to the lift, which descends (or, on the last floor, offers a choice of transmission). Foes escalate: five sentinels on floor 1, then four plus a hunter, three plus a hunter in the stacks, three plus two hunters on the ring, and three plus two hunters and an Overseer in the vault. Foe health grows for the first three floors and then holds. Modules are found in caches, with one slot opening per floor. Health, medkits, and scanner energy supply limited resources. A seed reproduces the map. Victory and death both leave chat available for discussion.
 
 The records and objective chain are fixed in version 0.1; geometry and room roles change by seed. The text of ECHO's messages does not change mechanics. Scanner pulses extend sight but do not penetrate walls, and expire on the next turn.
 
@@ -32,7 +32,7 @@ The first playable slice was a fixed chain of rooms with flat bump combat, an em
 - **The ending is a choice.** `Signal` options gated by trust and by optional data fragments, one of which recasts ECHO itself.
 - **Reasons to replay.** A score and a shared daily seed.
 
-The difficulty band test (`tests/expedition.rs`) was kept honest throughout: the omniscient, charge-everything planner wins 86 of 100 seeds. It never uses stealth, pulses, terminals or truces, so it is a floor for player skill.
+The difficulty band test (`tests/expedition.rs`) was kept honest throughout: the omniscient, charge-everything planner wins 78 of 100 seeds on five floors (86 of 100 when there were three). It never uses stealth, pulses, terminals or truces, so it is a floor for player skill.
 
 ## Roadmap
 

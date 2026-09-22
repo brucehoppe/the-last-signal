@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use the_last_signal::core::{Game, Outcome, Pos, FLOORS};
+use the_last_signal::core::{Game, Outcome, Pos, FLOORS, FRAGMENT_BASE};
 
 // A test-only omniscient route planner verifies that generated expeditions
 // are finishable through the real action API. Never used in model context.
@@ -70,7 +70,13 @@ fn difficulty_stays_in_band() {
         if g.outcome == Outcome::Escaped {
             won += 1;
             assert_eq!(g.floor, FLOORS - 1);
-            assert_eq!(g.records_found.iter().filter(|id| **id < 9).count(), 9);
+            assert_eq!(
+                g.records_found
+                    .iter()
+                    .filter(|id| **id < FRAGMENT_BASE)
+                    .count(),
+                3 * FLOORS
+            );
         } else {
             died_on[g.floor] += 1;
         }
@@ -89,11 +95,11 @@ fn a_full_three_floor_expedition_can_be_won_and_replayed() {
         .expect("some seed among the first forty is a planner win");
     assert_eq!(g.outcome, Outcome::Escaped);
     assert_eq!(g.floor, FLOORS - 1);
-    assert!(g.records_found.len() >= 9);
+    assert!(g.records_found.len() >= 3 * FLOORS);
     assert!(g.replay_matches());
     assert!(
         g.turn > 250,
-        "three floors is a real expedition, got {} turns",
+        "five floors is a real expedition, got {} turns",
         g.turn
     );
 }

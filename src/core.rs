@@ -3,29 +3,45 @@ use std::collections::HashSet;
 
 pub const WIDTH: i32 = 44;
 pub const HEIGHT: i32 = 28;
-pub const FLOORS: usize = 3;
+pub const FLOORS: usize = 5;
 pub const MAX_HP: i32 = 24;
 pub const MAX_MEDKITS: u32 = 5;
 pub const FLOOR_NAMES: [&str; FLOORS] = [
     "The Surface Complex",
     "The Coolant Levels",
+    "The Archive Stacks",
+    "The Reactor Ring",
     "The Signal Vault",
 ];
-/// Records 0-8 are the archive keys, three per floor (id / 3 = floor). Records
-/// 9-11 are optional data fragments, one per floor (`FRAGMENT_BASE + floor`).
-pub const FRAGMENT_BASE: usize = 9;
-pub const RECORDS: [&str; 12] = [
+/// Records 0-14 are the archive keys, three per floor (id / 3 = floor). Records
+/// 15-19 are optional data fragments, one per floor (`FRAGMENT_BASE + floor`).
+pub const FRAGMENT_BASE: usize = 3 * FLOORS;
+pub const RECORDS: [&str; 4 * FLOORS] = [
+    // Floor 1: the Surface Complex
     "Maintenance 04: The relay failed after coolant was diverted to the sealed lower levels.",
     "Evacuation 11: Survivors left through the surface lift. Their destination was North Station.",
     "Operator 19: Restore the relay using all three archive keys, then return to the surface lift.",
+    // Floor 2: the Coolant Levels
     "Maintenance 22: The coolant was diverted on purpose. The sealed levels were flooded to stop a failing reactor.",
     "Warden Log 07: We sealed the lower levels behind us. The Custodians would not let us carry the archives out.",
     "Custodian Directive 3: Sentinels hold every relay until the Wardens return. This order was never rescinded.",
+    // Floor 3: the Archive Stacks
+    "Archivist 12: The stacks index is intact. Every record we could not carry out was copied into the Custodians' loop memory.",
+    "Custodian Directive 5: Archive access is granted to any operator who restores a relay. Sealed records unlock in order.",
+    "Archivist 27: The evacuation manifest lists ECHO as cargo, not crew. We left it plugged into the stacks.",
+    // Floor 4: the Reactor Ring
+    "Reactor Watch 3: The core is stable at low power. The ring lifts run only while a relay on this floor is live.",
+    "Warden Log 44: We cut the reactor to a trickle before we left. Restoring full power would wake every sentinel in the complex.",
+    "Custodian Directive 7: Reactor output stays at minimum until the Wardens return. Hunters patrol the ring.",
+    // Floor 5: the Signal Vault
     "Warden Log 31: North Station has a mast. If the relay signal reaches it, the network wakes and the Custodians stand down.",
     "Custodian Directive 9: Standing down requires an authorised Warden signal. None has been received.",
     "Operator 40: Transmit from the vault lift. Whoever reads this: the Custodians were never enemies, only unfinished.",
+    // Data fragments, one per floor
     "Unsent Letter: We promised the Custodians we would return with orders. None of us ever intended to come back.",
     "Custodian Loop 88412: Relay guarded. No Warden signal received. Operators who restore relays are to be assisted, not harmed.",
+    "Stacks Marginalia: Written by hand in the index: ECHO keeps asking where the crew went. We stopped answering it.",
+    "Ring Work Order: A Custodian unit rewired the ring lifts so operators could pass. The order is signed with an ECHO checksum.",
     "Core Manifest: Unit ECHO is the Custodian coordination intelligence. Damaged during the evacuation. Memory partitioned by Warden order.",
 ];
 
@@ -60,6 +76,22 @@ pub const CHALLENGES: [Challenge; FLOORS] = [
         record: 3,
     },
     Challenge {
+        question: "State who is granted archive access.",
+        options: [
+            "Any operator who restores a relay",
+            "Warden officers only",
+            "Nobody until the reactor is stable",
+        ],
+        answer: 0,
+        record: 7,
+    },
+    Challenge {
+        question: "State the reactor's present output.",
+        options: ["Full power", "Kept at a trickle", "Shut down entirely"],
+        answer: 1,
+        record: 10,
+    },
+    Challenge {
         question: "State what Custodian units require before standing down.",
         options: [
             "The Overseer's destruction",
@@ -67,7 +99,7 @@ pub const CHALLENGES: [Challenge; FLOORS] = [
             "A relay power failure",
         ],
         answer: 1,
-        record: 7,
+        record: 13,
     },
 ];
 /// A record as it comes out of a failing archive: the heading survives, the
@@ -146,10 +178,13 @@ impl EnemyKind {
             _ => 9,
         }
     }
+    /// Health grows with depth for the first three floors, then holds: the
+    /// deeper floors get harder through who is there, not through hit points.
     pub fn max_hp(self, floor: usize) -> i32 {
+        let depth = floor.min(2) as i32;
         match self {
-            EnemyKind::Sentinel => 6 + floor as i32,
-            EnemyKind::Hunter => 6 + floor as i32,
+            EnemyKind::Sentinel => 6 + depth,
+            EnemyKind::Hunter => 6 + depth,
             EnemyKind::Overseer => 16,
         }
     }
@@ -351,7 +386,7 @@ impl Faction {
     }
 }
 /// Which faction authored each archive record (index = record id).
-pub const RECORD_AUTHORS: [Faction; 12] = [
+pub const RECORD_AUTHORS: [Faction; 4 * FLOORS] = [
     Faction::Custodians,
     Faction::Wardens,
     Faction::Wardens,
@@ -361,25 +396,41 @@ pub const RECORD_AUTHORS: [Faction; 12] = [
     Faction::Wardens,
     Faction::Custodians,
     Faction::Wardens,
+    Faction::Custodians,
+    Faction::Wardens,
+    Faction::Custodians,
+    Faction::Wardens,
+    Faction::Custodians,
+    Faction::Wardens,
+    Faction::Wardens,
+    Faction::Custodians,
     Faction::Wardens,
     Faction::Custodians,
     Faction::Custodians,
 ];
 /// What ECHO makes of each record once it has read it back: the practical
 /// consequence, so that evidence changes what the player knows how to do.
-pub const ECHO_NOTES: [&str; 12] = [
+pub const ECHO_NOTES: [&str; 4 * FLOORS] = [
     "ECHO: The coolant went down, so the answers are down. Every relay we restore frees the lift.",
     "ECHO: North Station. Keep that name; Custodian terminals test operators on the record.",
     "ECHO: Three keys, the relay, then back to the lift. That is the whole procedure, floor by floor.",
     "ECHO: The flooding was deliberate, to stop a reactor. This floor's terminal asks about exactly that.",
     "ECHO: The Wardens sealed these levels behind them. Nobody was meant to come back this way.",
     "ECHO: Sentinels hold posts. Break line of sight and they walk home; they will not chase far from it.",
+    "ECHO: Copied into Custodian loop memory. Whatever the stacks lost, their units still carry.",
+    "ECHO: Access for whoever restores a relay. That is the terminal's question on this floor, word for word.",
+    "ECHO: Cargo, not crew. I do not remember being left. I am not sure I want to.",
+    "ECHO: Low power, and the ring lifts need a live relay. Same procedure, but the relay matters twice here.",
+    "ECHO: A trickle, on purpose. The terminal asks about output; do not let anyone talk us into full power.",
+    "ECHO: Hunters on the ring. Keep corners between us and them; they track for a few turns after losing sight.",
     "ECHO: A mast at North Station. If our signal reaches it, the whole network hears.",
     "ECHO: They need an authorised signal. If the Custodians trust us (standing 0 or more) we can send one from the vault.",
     "ECHO: Never enemies, only unfinished. We get to choose what finishes them.",
     "ECHO: They never meant to return. The Custodians have been keeping a promise nobody else kept.",
     "ECHO: Assisted, not harmed. Restore a relay in good standing and their units stand down.",
-    "ECHO: ...That is me. Coordination intelligence. Partitioned. I did not know. With all three fragments I can testify.",
+    "ECHO: Someone stopped answering me. I think I have been asking that question for a very long time.",
+    "ECHO: Signed with my checksum. A unit rewired the lifts for operators, and I signed for it. I do not remember doing so.",
+    "ECHO: ...That is me. Coordination intelligence. Partitioned. I did not know. With every fragment I can testify.",
 ];
 /// What you send from the vault lift. The evidence and the trust you gathered
 /// decide which of these are open to you.
@@ -433,7 +484,7 @@ impl Difficulty {
             }
             Difficulty::Standard => "The expedition as designed. Full score.",
             Difficulty::Hard => {
-                "Foes have 2 more health and an extra sentinel guards floors 2 and 3. Score x1.25."
+                "Foes have 2 more health and an extra sentinel guards every floor below the first. Score x1.25."
             }
         }
     }
@@ -716,10 +767,11 @@ impl Game {
                 recovered: false,
             });
         }
-        // Deeper floors trade sentinels for tougher foes instead of adding to the crowd.
+        // Deeper floors trade sentinels for tougher foes instead of adding to the
+        // crowd: at least two posts stay manned however deep you go.
         let mut posts: Vec<usize> = others[..3].to_vec();
         posts.insert(0, spare_room);
-        let manned = floor.saturating_sub(self.difficulty.extra_posts());
+        let manned = floor.min(2).saturating_sub(self.difficulty.extra_posts());
         for &room in posts.iter().skip(manned) {
             self.enemies.push(Enemy::new(
                 centers[room].offset(2, 1),
@@ -732,8 +784,10 @@ impl Game {
             EnemyKind::Sentinel,
             self.foe_hp(EnemyKind::Sentinel) + 2,
         ));
-        // Hunters join from floor 2: one more on each deeper floor.
-        for h in 0..floor {
+        // Hunters join from floor 2; the stacks are quieter, the ring and the
+        // vault are patrolled by two.
+        const HUNTERS: [usize; FLOORS] = [0, 1, 1, 2, 2];
+        for h in 0..HUNTERS[floor] {
             self.enemies.push(Enemy::new(
                 centers[others[h]].offset(-2, -1),
                 EnemyKind::Hunter,
@@ -1245,7 +1299,7 @@ impl Game {
     }
     fn descend(&mut self) {
         self.floor += 1;
-        self.hp = (self.hp + 8).min(MAX_HP);
+        self.hp = (self.hp + 10).min(MAX_HP);
         self.medkits = (self.medkits + 1).min(MAX_MEDKITS);
         self.energy = START_ENERGY;
         self.turn += 1;
@@ -1260,7 +1314,7 @@ impl Game {
         self.log(
             "descend",
             &format!(
-                "Rest bay: +8 health, +1 medkit, power restored. {} module slots open.",
+                "Rest bay: +10 health, +1 medkit, power restored. {} module slots open.",
                 slots
             ),
         );
@@ -2466,7 +2520,7 @@ mod tests {
         g.player = g.lift;
         g.interact();
         assert_eq!((g.floor, g.outcome), (1, Outcome::Exploring));
-        assert_eq!((g.hp, g.medkits, g.energy), (18, 4, START_ENERGY));
+        assert_eq!((g.hp, g.medkits, g.energy), (20, 4, START_ENERGY));
         assert_eq!((g.kills, g.standing.len()), (2, 2));
         assert!(g.standing[0] >= 2, "faction standing carries over");
         assert!(!g.restored && g.archives.iter().all(|a| !a.recovered));
@@ -2493,7 +2547,9 @@ mod tests {
         }
         assert_eq!(kinds[0], (5, 0, 0, 6));
         assert_eq!(kinds[1], (4, 1, 0, 7));
-        assert_eq!(kinds[2], (3, 2, 1, 8));
+        assert_eq!(kinds[2], (3, 1, 0, 8));
+        assert_eq!(kinds[3], (3, 2, 0, 8));
+        assert_eq!(kinds[4], (3, 2, 1, 8));
     }
     #[test]
     fn hunters_hit_harder_and_the_overseer_is_slow() {
@@ -2806,7 +2862,12 @@ mod tests {
         assert_eq!(g.recovered(), 0, "a fragment is not a relay key");
         assert!(g.signal_open(Signal::Testimony).is_err());
         g.records_found
-            .extend([FRAGMENT_BASE + 1, FRAGMENT_BASE + 2]);
+            .extend((1..FLOORS - 1).map(|f| FRAGMENT_BASE + f));
+        assert!(
+            g.signal_open(Signal::Testimony).is_err(),
+            "one fragment short"
+        );
+        g.records_found.push(FRAGMENT_BASE + FLOORS - 1);
         assert!(g.signal_open(Signal::Testimony).is_ok());
         g.validate().unwrap();
     }

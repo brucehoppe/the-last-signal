@@ -70,3 +70,7 @@ Screens checked in a real window: HUD on floor 2 (floor label, module costs, Ana
 ## Real-model check of the ECHO tasks
 
 `cargo test --release --test real_model -- --ignored --nocapture` talks to the configured local model. On 2026-09-20 (macOS, Ollama, `qwen3.5:9b`, warm) it declined to answer the floor-1 terminal while the Evacuation record was unrecovered, quoted that record verbatim once it was recovered (3.9 s), and then answered the terminal from it (2.2 s). This is one model on one machine, not a benchmark; it is not run in CI.
+
+## Five-floor balance (2026-09-22)
+
+Two floors were added between the Coolant Levels and the Signal Vault: the Archive Stacks and the Reactor Ring, each with three records, a terminal challenge and a fragment. With hunters simply growing by one per floor and foe health growing with depth, the planner won 10 of 100 and died on the last two floors. Capping foe health at the floor-3 value, giving the stacks one hunter and the ring and vault two, and raising the rest-bay heal from 8 to 10 brought it to 78 of 100, every death in the vault. Saves from the three-floor prototype (version 3) are refused with a message, because record ids changed meaning.

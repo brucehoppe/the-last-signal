@@ -36,7 +36,7 @@ pub fn write(game: &Game, path: &Path) -> Result<(), String> {
     serde_json::to_writer_pretty(
         &mut tmp,
         &Envelope {
-            version: 3,
+            version: 4,
             game: game.clone(),
         },
     )
@@ -59,7 +59,13 @@ pub fn read(path: &Path) -> Result<Game, String> {
     }
     let envelope: Envelope =
         serde_json::from_slice(&bytes).map_err(|e| format!("Invalid save: {e}"))?;
-    if !(1..=3).contains(&envelope.version) {
+    if envelope.version < 4 {
+        return Err(
+            "Save from the three-floor prototype: the complex has grown. Start a new signal."
+                .into(),
+        );
+    }
+    if envelope.version > 4 {
         return Err("Unsupported save version".into());
     }
     let mut game = envelope.game;

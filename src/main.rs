@@ -1005,7 +1005,7 @@ async fn main() {
                         18.,
                         TEAL,
                     );
-                    wrapped("The complex is silent. On each of three floors, recover three archive keys, restore the relay, and take the lift down. Transmit the last signal from the vault.",217.,270.,76,22.,LIGHT,4);
+                    wrapped("The complex is silent. On each of five floors, recover three archive keys, restore the relay, and take the lift down. Transmit the last signal from the vault.",217.,270.,76,22.,LIGHT,4);
                     wrapped("The archives are failing: records come out damaged, and only ECHO, your companion, can read them back. Ask it what they say, how to answer the Custodian terminals, and which way to go. With Ollama it is a real local model; without it, a built-in script answers.",217.,377.,88,18.,MUTED,4);
                     text(
                         "E interact   H medkit   F scan  G analyze  Q pulse   I equip   J evidence",
