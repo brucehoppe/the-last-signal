@@ -2112,6 +2112,135 @@ impl Game {
         }
         None
     }
+    /// What the player can tell about a tile by looking at it: only discovered
+    /// tiles, and only foes in sight. `None` for plain floor and unknown tiles.
+    pub fn describe(&self, p: Pos) -> Option<String> {
+        if !self.discovered(p) {
+            return None;
+        }
+        if p == self.player {
+            return Some(format!(
+                "You: {}/{MAX_HP} HP, {} medkits, {} power.",
+                self.hp, self.medkits, self.energy
+            ));
+        }
+        if let Some(e) = self.enemies.iter().find(|e| e.pos == p && self.can_see(p)) {
+            let state = if e.stun > 0 {
+                format!("stunned for {} more turn(s)", e.stun)
+            } else if e.passive {
+                "stood down: it ignores you unless struck".into()
+            } else {
+                match e.awareness {
+                    Awareness::Alert => "alert to you".into(),
+                    Awareness::Searching => "searching for you".into(),
+                    Awareness::Idle => "at its post, unaware".into(),
+                }
+            };
+            let next = if e.awareness != Awareness::Alert || e.stun > 0 {
+                AMBUSH_DAMAGE
+            } else {
+                3
+            };
+            return Some(format!(
+                "{}: {}/{} HP, {state}; strikes for {}. Your next hit does {next}.",
+                e.kind.name(),
+                e.hp,
+                self.foe_hp(e.kind),
+                e.kind.damage()
+            ));
+        }
+        if let Some(a) = self.archives.iter().find(|a| a.pos == p) {
+            return Some(if a.recovered {
+                "Archive: its record is recovered.".into()
+            } else {
+                "Archive: stand beside it and press E for its record (a relay key).".into()
+            });
+        }
+        if p == self.relay {
+            return Some(if self.restored {
+                "Relay: online.".into()
+            } else {
+                format!(
+                    "Relay: needs three keys ({}/3 recovered).",
+                    self.recovered()
+                )
+            });
+        }
+        if p == self.lift {
+            return Some(
+                if self.floor + 1 < FLOORS {
+                    "Lift: descends once the relay is restored."
+                } else {
+                    "Vault lift: transmits the last signal once the relay is restored."
+                }
+                .into(),
+            );
+        }
+        if let Some(t) = self.terminal.as_ref().filter(|t| t.pos == p) {
+            return Some(
+                match t.state {
+                    TerminalState::Locked => {
+                        "Custodian terminal: one attempt to answer from this floor's records."
+                    }
+                    TerminalState::Solved => "Custodian terminal: answered, accepted.",
+                    TerminalState::Failed => "Custodian terminal: answered, rejected.",
+                }
+                .into(),
+            );
+        }
+        if let Some(c) = self.caches.iter().find(|c| c.pos == p) {
+            return Some(if c.taken {
+                "Cache: emptied.".into()
+            } else {
+                format!("Cache: holds a {}.", c.module.name())
+            });
+        }
+        if let Some(k) = self.pickups.iter().find(|k| k.pos == p && !k.taken) {
+            return Some(match k.kind {
+                PickupKind::PowerCell => {
+                    format!("Power cell: +{CELL_POWER} power when walked over.")
+                }
+                PickupKind::Medkit => "Medkit: picked up when walked over.".into(),
+                PickupKind::Fragment => {
+                    "Data fragment: an optional record, off the main path.".into()
+                }
+            });
+        }
+        None
+    }
+    /// The nearest known tile that borders something unseen: where exploring
+    /// should go next. `None` once the known map has no loose edges, or when a
+    /// foe in sight makes wandering unwise.
+    pub fn frontier(&self) -> Option<Pos> {
+        if self
+            .enemies
+            .iter()
+            .any(|e| self.can_see(e.pos) && !e.passive)
+        {
+            return None;
+        }
+        let mut seen = HashSet::from([self.player]);
+        let mut queue = std::collections::VecDeque::from([self.player]);
+        while let Some(p) = queue.pop_front() {
+            let loose = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                .into_iter()
+                .any(|(dx, dy)| Self::index(p.offset(dx, dy)).is_some_and(|i| !self.seen[i]));
+            if loose && p != self.player {
+                return Some(p);
+            }
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let n = p.offset(dx, dy);
+                if self.floor(n)
+                    && self.discovered(n)
+                    && !self.enemies.iter().any(|e| e.pos == n)
+                    && seen.insert(n)
+                {
+                    queue.push_back(n);
+                }
+            }
+        }
+        None
+    }
     /// Context-sensitive onboarding tip, derived purely from state so it needs
     /// no saved flags and can never disagree with the game.
     pub fn hint(&self) -> Option<&'static str> {
@@ -2775,6 +2904,49 @@ mod tests {
         assert_eq!(g.summary().rank, "Silent Signal");
         g.kills = 10;
         assert_eq!(g.summary().rank, "Custodian's Bane");
+    }
+    #[test]
+    fn looking_shows_only_what_is_discovered_and_in_sight() {
+        let mut g = Game::new(42);
+        let e = g.enemies[0].pos;
+        g.seen.fill(false);
+        g.visible.fill(false);
+        assert!(g.describe(e).is_none(), "unknown tile");
+        g.seen.fill(true);
+        assert!(
+            g.describe(e).is_none(),
+            "a remembered tile does not show a foe that is out of sight"
+        );
+        g.visible.fill(true);
+        let d = g.describe(e).unwrap();
+        assert!(d.starts_with("Sentinel: 6/6 HP, at its post, unaware"));
+        assert!(d.ends_with("Your next hit does 6."));
+        assert!(g.describe(g.player).unwrap().starts_with("You: 24/24 HP"));
+        assert!(
+            g.describe(g.lift).unwrap().starts_with("You"),
+            "standing on the lift"
+        );
+        g.player = g.relay;
+        assert!(g.describe(g.lift).unwrap().starts_with("Lift"));
+        assert!(g.describe(g.archives[0].pos).unwrap().contains("relay key"));
+        let cache = g.caches[0].pos;
+        assert!(g.describe(cache).unwrap().starts_with("Cache: holds a "));
+    }
+    #[test]
+    fn the_frontier_is_a_known_tile_beside_the_unknown() {
+        let mut g = Game::new(42);
+        g.enemies.clear();
+        let f = g.frontier().expect("the start room has loose edges");
+        assert!(g.discovered(f) && g.floor(f));
+        assert!(g.known_route(f).is_some());
+        g.seen.fill(true);
+        assert!(
+            g.frontier().is_none(),
+            "nothing left once everything is seen"
+        );
+        let mut g = Game::new(42);
+        g.visible.fill(true);
+        assert!(g.frontier().is_none(), "no wandering with a foe in sight");
     }
     #[test]
     fn recap_states_the_run() {

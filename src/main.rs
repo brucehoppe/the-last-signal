@@ -206,6 +206,14 @@ fn route_target(g: &Game, question: &str) -> Option<Pos> {
     };
     target.filter(|t| g.known_route(*t).is_some())
 }
+/// The map tile under a point in design coordinates, if any.
+fn map_tile(vp: Vec2) -> Option<Pos> {
+    let (x, y) = (((vp.x - 28.) / 19.).floor(), ((vp.y - 109.) / 19.).floor());
+    (x >= 0. && y >= 0. && x < WIDTH as f32 && y < HEIGHT as f32).then_some(Pos {
+        x: x as i32,
+        y: y as i32,
+    })
+}
 fn draw_map(g: &Game, route: &[Pos]) {
     draw_rectangle(24., 105., 844., 540., PANEL);
     for y in 0..HEIGHT {
@@ -499,6 +507,10 @@ async fn main() {
     let mut hurt_at = -1.0f64;
     // Set once the current run's end has been dealt with (save retired, run recorded).
     let mut run_recorded = false;
+    // Tiles still to walk after a map click or O (explore), one per tick.
+    let mut travel: Vec<Pos> = vec![];
+    let mut travel_tick = 0.0f64;
+    let mut exploring = false;
     let mut history = profile::load();
     // What the end screen says about this run against the history.
     let mut end_note = String::new();
@@ -709,6 +721,22 @@ async fn main() {
         }
         let map_t = get_time();
         draw_map(&g, &overlay_path);
+        let (mx, my) = mouse_position();
+        let vp = vec2(mx * 1280. / screen_width(), my * 800. / screen_height());
+        let looked = matches!(screen, Screen::Game)
+            .then(|| map_tile(vp))
+            .flatten()
+            .and_then(|p| g.describe(p).map(|d| (p, d)));
+        if let Some((p, _)) = &looked {
+            draw_rectangle_lines(
+                28. + p.x as f32 * 19.,
+                109. + p.y as f32 * 19.,
+                19.,
+                19.,
+                1.5,
+                LIGHT,
+            );
+        }
         for (i, (label, color, born)) in floats.iter().rev().take(3).enumerate() {
             let age = (now - born) as f32;
             let x = (37. + g.player.x as f32 * 19. - label.len() as f32 * 4.).clamp(30., 780.);
@@ -732,13 +760,16 @@ async fn main() {
             );
         }
         map_sum += get_time() - map_t;
-        text(
-            "ARCHIVE A  RELAY R  LIFT L  CACHE C  TERMINAL T  FRAGMENT f  POWER *  MEDKIT +  FOE S H O",
-            28.,
-            672.,
-            15.,
-            MUTED,
-        );
+        match &looked {
+            Some((_, d)) => text(d, 28., 672., 15., LIGHT),
+            None => text(
+                "ARCHIVE A  RELAY R  LIFT L  CACHE C  TERMINAL T  FRAGMENT f  POWER *  MEDKIT +  FOE S H O  /  hover: look",
+                28.,
+                672.,
+                14.,
+                MUTED,
+            ),
+        }
         for (i, e) in g.events.iter().rev().take(4).enumerate() {
             let msg = format!("{:03}  {}", e.turn, e.text);
             text(
@@ -752,10 +783,10 @@ async fn main() {
         match g.hint() {
             Some(h) => text(&format!("> {h}"), 28., 788., 16., AMBER),
             None => text(
-                "WASD move  E interact  H heal  F scan  G analyze  Q pulse  I equip  SPACE wait  J journal",
+                "WASD move  E interact  H heal  F scan  G analyze  Q pulse  I equip  SPACE wait  O explore  J journal  click map: walk",
                 28.,
                 788.,
-                15.,
+                14.,
                 MUTED,
             ),
         }
@@ -794,8 +825,6 @@ async fn main() {
                 transcript.push((String::new(), MUTED));
             }
         }
-        let (mx, my) = mouse_position();
-        let vp = vec2(mx * 1280. / screen_width(), my * 800. / screen_height());
         let active = matches!(screen, Screen::Game);
         if active && Rect::new(890., 112., 366., 423.).contains(vp) {
             let (_, dy) = mouse_wheel();
@@ -900,6 +929,46 @@ async fn main() {
                 }
             } else {
                 while get_char_pressed().is_some() {}
+                // Any key interrupts walking; a click on a known tile starts it.
+                if get_last_key_pressed().is_some() && !travel.is_empty() {
+                    travel.clear();
+                    exploring = false;
+                    status = "Walk interrupted.".into();
+                }
+                if is_key_pressed(KeyCode::O) && g.outcome == Outcome::Exploring {
+                    match g.frontier().and_then(|f| g.known_route(f)) {
+                        Some(route) => {
+                            travel = route[1..].to_vec();
+                            exploring = true;
+                            status =
+                                "Exploring. Any key stops; a foe in sight stops it too.".into();
+                        }
+                        None => {
+                            status = if g.enemies.iter().any(|e| g.can_see(e.pos) && !e.passive) {
+                                "Not with a foe in sight.".into()
+                            } else {
+                                "Nothing left to explore on the known map.".into()
+                            }
+                        }
+                    }
+                }
+                if is_mouse_button_pressed(MouseButton::Left) && g.outcome == Outcome::Exploring {
+                    if let Some(t) = map_tile(vp).filter(|t| *t != g.player) {
+                        match g.known_route(t) {
+                            Some(route)
+                                if !g.enemies.iter().any(|e| g.can_see(e.pos) && !e.passive) =>
+                            {
+                                travel = route[1..].to_vec();
+                                exploring = false;
+                            }
+                            Some(_) => status = "Not with a foe in sight.".into(),
+                            None if g.discovered(t) && g.floor(t) => {
+                                status = "No known way there yet.".into()
+                            }
+                            None => {}
+                        }
+                    }
+                }
                 if is_key_pressed(KeyCode::Up) || is_key_pressed(KeyCode::W) {
                     g.step(0, -1);
                 } else if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::S) {
@@ -959,6 +1028,40 @@ async fn main() {
                             prompt.clear();
                         }
                         Err(e) => status = e,
+                    }
+                }
+            }
+        }
+        // Walk one tile per tick along the chosen route, through the ordinary
+        // move rules, so the action log and replay stay exact.
+        if active && !travel.is_empty() && now - travel_tick > 0.07 {
+            travel_tick = now;
+            let hp_before = g.hp;
+            let next = travel[0];
+            let blocked = !g.floor(next)
+                || g.enemies.iter().any(|e| e.pos == next)
+                || next.distance(g.player) != 1;
+            if blocked || g.outcome != Outcome::Exploring {
+                travel.clear();
+                exploring = false;
+            } else {
+                g.step(next.x - g.player.x, next.y - g.player.y);
+                travel.remove(0);
+                if g.enemies.iter().any(|e| g.can_see(e.pos) && !e.passive) {
+                    travel.clear();
+                    exploring = false;
+                    status = "Halted: a foe is in sight.".into();
+                } else if g.hp < hp_before {
+                    travel.clear();
+                    exploring = false;
+                }
+            }
+            if travel.is_empty() && exploring && g.outcome == Outcome::Exploring {
+                match g.frontier().and_then(|f| g.known_route(f)) {
+                    Some(route) => travel = route[1..].to_vec(),
+                    None => {
+                        exploring = false;
+                        status = "Explored everything reachable on this floor.".into();
                     }
                 }
             }
