@@ -16,12 +16,32 @@
 <body>
   <canvas id="glcanvas" tabindex="1"></canvas>
   <footer>
-    Browser demo: WASD/arrows move, E interact, H medkit, F scan, G analyze, I equip, J evidence.
-    ECHO is a built-in script here; saving is off, but your run history stays in this browser.
+    <span id="note">Browser demo: WASD/arrows move, E interact, H medkit, F scan, G analyze, I equip, J evidence.
+    ECHO is a built-in script here; saving is off, but your run history stays in this browser.</span>
     <a href="https://github.com/brucehoppe/the-last-signal">Source and desktop build with a real local AI</a>
   </footer>
   <script src="gl.js"></script>
   <script src="storage.js"></script>
-  <script>load("the-last-signal.wasm");</script>
+  <script>
+    // Say why the canvas is blank instead of leaving it black. Safari's
+    // Lockdown Mode, for one, blocks WebAssembly and WebGL on sites that are
+    // not excluded, and the game needs both.
+    (function () {
+      var note = document.getElementById("note");
+      function fail(why) {
+        note.textContent = "The demo cannot start here: " + why +
+          " In Safari, Lockdown Mode blocks WebAssembly and WebGL; exclude this site (Safari > Settings > Websites > Lockdown Mode) and reload.";
+        note.style.color = "#fd6657";
+      }
+      if (typeof WebAssembly === "undefined") return fail("WebAssembly is blocked.");
+      var probe = document.createElement("canvas");
+      if (!(probe.getContext("webgl") || probe.getContext("experimental-webgl"))) return fail("WebGL is blocked.");
+      window.addEventListener("error", function (e) { fail(e.message || String(e.error)); });
+      window.addEventListener("unhandledrejection", function (e) {
+        fail(e.reason && e.reason.message ? e.reason.message : String(e.reason));
+      });
+      load("the-last-signal.wasm");
+    })();
+  </script>
 </body>
 </html>
