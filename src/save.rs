@@ -103,6 +103,33 @@ pub fn retire_if_same_run(path: &Path, seed: u64) -> bool {
         .is_some_and(|v| v["game"]["seed"].as_u64() == Some(seed));
     same && retire(path).is_ok()
 }
+/// Write a morgue file beside the save: the recap plus the last events of
+/// the run. Returns where it went.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_morgue(game: &Game, save_path: &Path, date: &str) -> Result<PathBuf, String> {
+    let dir = save_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+        .join("morgue");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{date}-seed{}-turn{}.txt", game.seed, game.turn));
+    let mut text = game.recap();
+    text.push_str("\nLast events:\n");
+    for e in game
+        .events
+        .iter()
+        .rev()
+        .take(40)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        text.push_str(&format!("{:04}  {}\n", e.turn, e.text));
+    }
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    Ok(path)
+}
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
 mod tests {
@@ -130,6 +157,21 @@ mod tests {
         let mut g = Game::new(3);
         g.tiles.clear();
         assert!(write(&g, &p).is_err());
+    }
+    #[test]
+    fn morgue_files_hold_the_recap_and_events() {
+        let d = tempfile::tempdir().unwrap();
+        let mut g = Game::new(3);
+        g.step(1, 0);
+        g.hp = 0;
+        g.outcome = crate::core::Outcome::Dead;
+        let p = write_morgue(&g, &d.path().join("save.json"), "2026-09-22").unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(p
+            .to_string_lossy()
+            .contains("morgue/2026-09-22-seed3-turn1.txt"));
+        assert!(text.starts_with("THE LAST SIGNAL  |  seed 3"));
+        assert!(text.contains("Surface lift reached"));
     }
     #[test]
     fn a_finished_run_cannot_be_loaded() {

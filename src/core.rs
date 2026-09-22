@@ -2233,6 +2233,59 @@ impl Game {
             ],
         }
     }
+    /// A short plain-text account of the run to paste or share: what a
+    /// roguelike morgue file leads with. Same facts as the end screen.
+    pub fn recap(&self) -> String {
+        let summary = self.summary();
+        let mut out = format!(
+            "THE LAST SIGNAL  |  seed {}  |  {}{}\n{}  |  score {}\n",
+            self.seed,
+            self.difficulty.name(),
+            if crate::profile::daily_day(self.seed).is_some() {
+                "  |  daily signal"
+            } else {
+                ""
+            },
+            summary.rank,
+            self.score()
+        );
+        let fate = match self.outcome {
+            Outcome::Escaped => format!(
+                "Escaped in {} turns; sent {}",
+                self.turn,
+                self.signal.map_or("a distress call", |s| s.name())
+            ),
+            Outcome::Dead => format!(
+                "Lost on floor {} ({}) at turn {}",
+                self.floor + 1,
+                FLOOR_NAMES[self.floor],
+                self.turn
+            ),
+            Outcome::Exploring => format!(
+                "Still exploring floor {} ({}) at turn {}",
+                self.floor + 1,
+                FLOOR_NAMES[self.floor],
+                self.turn
+            ),
+        };
+        out.push_str(&format!(
+            "{fate}; {}/{} records; {} terminals; {} foes disabled\n",
+            self.records_found.len(),
+            RECORDS.len(),
+            self.terminals_solved,
+            self.kills
+        ));
+        out.push_str(&format!(
+            "Wardens {:+}  Custodians {:+}\n",
+            self.standing_of(Faction::Wardens),
+            self.standing_of(Faction::Custodians)
+        ));
+        if !summary.lines[3].is_empty() {
+            out.push_str(&summary.lines[3]);
+            out.push('\n');
+        }
+        out
+    }
     pub fn knowledge(&self) -> serde_json::Value {
         let mut ids = self.records_found.clone();
         ids.sort_unstable();
@@ -2722,6 +2775,21 @@ mod tests {
         assert_eq!(g.summary().rank, "Silent Signal");
         g.kills = 10;
         assert_eq!(g.summary().rank, "Custodian's Bane");
+    }
+    #[test]
+    fn recap_states_the_run() {
+        let mut g = Game::new(11);
+        g.hp = 0;
+        g.outcome = Outcome::Dead;
+        g.turn = 57;
+        let r = g.recap();
+        assert!(r.starts_with("THE LAST SIGNAL  |  seed 11  |  Standard\nLost Signal"));
+        assert!(r.contains("Lost on floor 1 (The Surface Complex) at turn 57"));
+        assert!(r.contains("Wardens +0  Custodians +0"));
+        let mut d = Game::new(crate::profile::DAILY_BASE + 3);
+        d.hp = 0;
+        d.outcome = Outcome::Dead;
+        assert!(d.recap().contains("daily signal"));
     }
     #[test]
     fn damaged_records_hide_every_terminal_answer_until_echo_reads_them() {

@@ -1694,12 +1694,12 @@ async fn main() {
                 Screen::Game => {}
             }
         } else if g.outcome != Outcome::Exploring {
-            draw_rectangle(185., 200., 540., 290., INK);
+            draw_rectangle(185., 200., 540., 335., INK);
             draw_rectangle_lines(
                 185.,
                 200.,
                 540.,
-                290.,
+                335.,
                 2.,
                 if g.outcome == Outcome::Escaped {
                     TEAL
@@ -1734,6 +1734,21 @@ async fn main() {
                 MUTED,
                 1,
             );
+            if button("COPY RECAP", Rect::new(212., 490., 160., 34.), active) {
+                macroquad::miniquad::window::clipboard_set(&g.recap());
+                #[cfg(target_arch = "wasm32")]
+                {
+                    status = "Recap copied to the clipboard: paste it anywhere.".into();
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let date = profile::date_of(macroquad::miniquad::date::now());
+                    status = match save::write_morgue(&g, &path, &date) {
+                        Ok(p) => format!("Recap copied. Morgue file written to {}", p.display()),
+                        Err(e) => format!("Recap copied, but the morgue file failed: {e}"),
+                    };
+                }
+            }
         }
         set_default_camera();
         if profile {
