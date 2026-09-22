@@ -489,6 +489,8 @@ async fn main() {
     let mut floats: Vec<(String, Color, f64)> = vec![];
     let mut events_seen = g.events.len();
     let mut hurt_at = -1.0f64;
+    // Set once the current run's end has been dealt with (save retired, run recorded).
+    let mut run_recorded = false;
     loop {
         // from_display_rect is y-up in macroquad 0.4; the UI is laid out y-down.
         let mut camera = Camera2D::from_display_rect(Rect::new(0., 0., 1280., 800.));
@@ -663,6 +665,13 @@ async fn main() {
         }
         events_seen = g.events.len();
         floats.retain(|f| now - f.2 < 1.1);
+        if g.outcome != Outcome::Exploring && !run_recorded {
+            run_recorded = true;
+            // One life: an earlier save of this run cannot bring it back.
+            if save::retire_if_same_run(&path, g.seed) {
+                status = "Expedition over. Its save file has been retired.".into();
+            }
+        }
         let map_t = get_time();
         draw_map(&g, &overlay_path);
         for (i, (label, color, born)) in floats.iter().rev().take(3).enumerate() {
@@ -908,7 +917,9 @@ async fn main() {
                     match save::read(&path) {
                         Ok(loaded) => {
                             g = loaded;
-                            status = "Save loaded, including companion memory.".into();
+                            let _ = save::retire(&path);
+                            run_recorded = false;
+                            status = "Save loaded, including companion memory. One life: the save file is used up until you press F5 again.".into();
                             scroll = 0;
                             prompt.clear();
                         }
@@ -972,7 +983,7 @@ async fn main() {
                         if DEMO {
                             "Browser demo: saving is off, so reloading the page starts over."
                         } else {
-                            "F5 saves. Closing the window does not auto-save."
+                            "F5 saves. One life: a loaded save is used up, and death retires it."
                         },
                         217.,
                         501.,
@@ -995,6 +1006,9 @@ async fn main() {
                             Ok(loaded) => {
                                 loadout = loaded.loadout.clone();
                                 g = loaded;
+                                let _ = save::retire(&path);
+                                run_recorded = false;
+                                status = "Save loaded. One life: the save file is used up until you press F5 again.".into();
                                 screen = Screen::Game;
                                 scroll = 0;
                             }
@@ -1355,6 +1369,7 @@ async fn main() {
                     wrapped("Unsaved progress in this window will be replaced. Your existing save file stays unchanged until you press F5.",217.,260.,77,21.,MUTED,4);
                     if button("NEW SEED", Rect::new(217., 410., 230., 42.), true) {
                         g = Game::new_with(seed(), &loadout);
+                        run_recorded = false;
                         screen = Screen::Game;
                         prompt.clear();
                         scroll = 0;
@@ -1365,6 +1380,7 @@ async fn main() {
                         // Same complex for everyone today: compare scores.
                         let day = (macroquad::miniquad::date::now() / 86_400.) as u64;
                         g = Game::new_with(20_000_000 + day, &loadout);
+                        run_recorded = false;
                         screen = Screen::Game;
                         prompt.clear();
                         scroll = 0;

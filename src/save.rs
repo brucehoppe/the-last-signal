@@ -65,7 +65,37 @@ pub fn read(path: &Path) -> Result<Game, String> {
     let mut game = envelope.game;
     game.migrate();
     game.validate()?;
+    if game.outcome != crate::core::Outcome::Exploring {
+        return Err("That expedition is over. Start a new signal.".into());
+    }
     Ok(game)
+}
+/// Where a save goes once it has been used up: loading it, or finishing the
+/// run it belongs to, moves it here so it cannot be loaded again. One run, one
+/// life; the file is kept, not deleted, in case you want to look at it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn retired_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".loaded");
+    path.with_file_name(name)
+}
+/// Move a save out of the way after it has been loaded.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn retire(path: &Path) -> Result<(), String> {
+    std::fs::rename(path, retired_path(path)).map_err(|e| e.to_string())
+}
+/// A run just ended: if the save on disk belongs to it (same seed), retire it,
+/// so death cannot be undone by reloading an earlier turn.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn retire_if_same_run(path: &Path, seed: u64) -> bool {
+    let same = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .is_some_and(|v| v["game"]["seed"].as_u64() == Some(seed));
+    same && retire(path).is_ok()
 }
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
@@ -95,6 +125,35 @@ mod tests {
         g.tiles.clear();
         assert!(write(&g, &p).is_err());
     }
+    #[test]
+    fn a_finished_run_cannot_be_loaded() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("save.json");
+        let mut g = Game::new(3);
+        g.hp = 0;
+        g.outcome = crate::core::Outcome::Dead;
+        write(&g, &p).unwrap();
+        assert!(read(&p).unwrap_err().contains("over"));
+    }
+    #[test]
+    fn a_loaded_save_is_retired_and_death_retires_its_own_run_only() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("save.json");
+        write(&Game::new(3), &p).unwrap();
+        retire(&p).unwrap();
+        assert!(!p.exists());
+        assert!(retired_path(&p).exists());
+        assert!(read(&p).is_err());
+        write(&Game::new(3), &p).unwrap();
+        assert!(
+            !retire_if_same_run(&p, 4),
+            "another run's save is left alone"
+        );
+        assert!(p.exists());
+        assert!(retire_if_same_run(&p, 3));
+        assert!(!p.exists());
+        assert!(!retire_if_same_run(&p, 3), "nothing left to retire");
+    }
 }
 
 // The browser demo has no filesystem: saving is switched off, not faked.
@@ -111,4 +170,12 @@ pub fn write(_: &Game, _: &Path) -> Result<(), String> {
 #[cfg(target_arch = "wasm32")]
 pub fn read(_: &Path) -> Result<Game, String> {
     Err(UNAVAILABLE.into())
+}
+#[cfg(target_arch = "wasm32")]
+pub fn retire(_: &Path) -> Result<(), String> {
+    Err(UNAVAILABLE.into())
+}
+#[cfg(target_arch = "wasm32")]
+pub fn retire_if_same_run(_: &Path, _: u64) -> bool {
+    false
 }
