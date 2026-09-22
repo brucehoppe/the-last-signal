@@ -407,6 +407,16 @@ enum Screen {
     Terminal,
     Transmit,
     Records,
+    Replay,
+}
+/// A finished run being played back from its action log on a fresh game.
+struct Replay {
+    game: Game,
+    next: usize,
+    paused: bool,
+    /// Actions per second.
+    speed: f64,
+    last: f64,
 }
 struct Pending {
     rx: Receiver<Result<String, String>>,
@@ -461,6 +471,15 @@ async fn main() {
             g.player = t.pos.offset(1, 0);
         }
         g.update_visibility(7);
+        if n == 7 {
+            // A short lost run, for the end screen and its replay.
+            for _ in 0..6 {
+                g.step(-1, 0);
+                g.step(0, 1);
+            }
+            g.hp = 0;
+            g.outcome = Outcome::Dead;
+        }
         screen = match n {
             2 => Screen::Journal,
             3 => Screen::Terminal,
@@ -507,6 +526,7 @@ async fn main() {
     let mut hurt_at = -1.0f64;
     // Set once the current run's end has been dealt with (save retired, run recorded).
     let mut run_recorded = false;
+    let mut replay: Option<Replay> = None;
     // Tiles still to walk after a map click or O (explore), one per tick.
     let mut travel: Vec<Pos> = vec![];
     let mut travel_tick = 0.0f64;
@@ -766,7 +786,7 @@ async fn main() {
                 "ARCHIVE A  RELAY R  LIFT L  CACHE C  TERMINAL T  FRAGMENT f  POWER *  MEDKIT +  FOE S H O  /  hover: look",
                 28.,
                 672.,
-                14.,
+                13.,
                 MUTED,
             ),
         }
@@ -1594,6 +1614,119 @@ async fn main() {
                         screen = Screen::Game;
                     }
                 }
+                Screen::Replay => {
+                    // The whole screen belongs to the replay: its own HUD, map and log.
+                    draw_rectangle(0., 0., 1280., 800., INK);
+                    if let Some(r) = replay.as_mut() {
+                        if is_key_pressed(KeyCode::Space) {
+                            r.paused = !r.paused;
+                        }
+                        if is_key_pressed(KeyCode::Equal) || is_key_pressed(KeyCode::KpAdd) {
+                            r.speed = (r.speed * 2.).min(64.);
+                        }
+                        if is_key_pressed(KeyCode::Minus) || is_key_pressed(KeyCode::KpSubtract) {
+                            r.speed = (r.speed / 2.).max(1.);
+                        }
+                        let step_once =
+                            is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::Period);
+                        let now = get_time();
+                        let due = !r.paused && now - r.last >= 1. / r.speed;
+                        if (due || step_once) && r.next < g.actions.len() {
+                            r.game.apply(g.actions[r.next]);
+                            r.next += 1;
+                            r.last = now;
+                        }
+                        let done = r.next >= g.actions.len();
+                        text("REPLAY", 28., 42., 32., AMBER);
+                        text(
+                            &format!(
+                                "SEED {}  /  {}  /  FLOOR {}/{}  {}",
+                                r.game.seed,
+                                r.game.difficulty.name().to_uppercase(),
+                                r.game.floor + 1,
+                                FLOORS,
+                                FLOOR_NAMES[r.game.floor].to_uppercase()
+                            ),
+                            29.,
+                            65.,
+                            15.,
+                            MUTED,
+                        );
+                        text(
+                            &format!(
+                                "ACTION {}/{}   TURN {:03}   {}x{}",
+                                r.next,
+                                g.actions.len(),
+                                r.game.turn,
+                                r.speed,
+                                if done {
+                                    "   FINISHED"
+                                } else if r.paused {
+                                    "   PAUSED"
+                                } else {
+                                    ""
+                                }
+                            ),
+                            29.,
+                            90.,
+                            15.,
+                            MUTED,
+                        );
+                        text(
+                            &format!(
+                                "HP {:02}/24  MED {}  PWR {}  KEYS {}/3  KILLS {}",
+                                r.game.hp,
+                                r.game.medkits,
+                                r.game.energy,
+                                r.game.recovered(),
+                                r.game.kills
+                            ),
+                            465.,
+                            90.,
+                            15.,
+                            if r.game.hp < 8 { CORAL } else { TEAL },
+                        );
+                        draw_map(&r.game, &[]);
+                        for (i, e) in r.game.events.iter().rev().take(4).enumerate() {
+                            let msg = format!("{:03}  {}", e.turn, e.text);
+                            text(
+                                &msg.chars().take(86).collect::<String>(),
+                                28.,
+                                700. + i as f32 * 20.,
+                                16.,
+                                if i == 0 { LIGHT } else { MUTED },
+                            );
+                        }
+                        text(
+                            "SPACE pause   RIGHT step   + / - speed   ESC close",
+                            28.,
+                            788.,
+                            15.,
+                            AMBER,
+                        );
+                        draw_rectangle(890., 24., 366., 738., PANEL);
+                        text("REPLAY", 909., 55., 27., TEAL);
+                        wrapped(
+                            "Every run replays exactly from its seed, starting module, difficulty and action log. What you see here is the same rules run again, not a recording.",
+                            909.,
+                            100.,
+                            39,
+                            15.,
+                            MUTED,
+                            6,
+                        );
+                        if button("CLOSE / ESC", Rect::new(907., 681., 158., 35.), true)
+                            || is_key_pressed(KeyCode::Escape)
+                        {
+                            screen = Screen::Game;
+                        }
+                    } else {
+                        screen = Screen::Game;
+                    }
+                    if !matches!(screen, Screen::Replay) {
+                        replay = None;
+                    }
+                }
                 Screen::Records => {
                     text("EXPEDITION RECORDS", 217., 185., 34., LIGHT);
                     text(
@@ -1832,11 +1965,27 @@ async fn main() {
                 "You can still talk to ECHO. ESC opens the menu.",
                 212.,
                 472.,
-                55,
+                66,
                 15.,
                 MUTED,
                 1,
             );
+            let can_replay = active && g.replayable && !g.actions.is_empty();
+            if button(
+                "WATCH REPLAY / R",
+                Rect::new(385., 490., 200., 34.),
+                can_replay,
+            ) || (can_replay && !focused && is_key_pressed(KeyCode::R))
+            {
+                replay = Some(Replay {
+                    game: Game::new_with_difficulty(g.seed, &g.loadout, g.difficulty),
+                    next: 0,
+                    paused: false,
+                    speed: 8.,
+                    last: get_time(),
+                });
+                screen = Screen::Replay;
+            }
             if button("COPY RECAP", Rect::new(212., 490., 160., 34.), active) {
                 macroquad::miniquad::window::clipboard_set(&g.recap());
                 #[cfg(target_arch = "wasm32")]

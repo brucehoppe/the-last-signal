@@ -34,7 +34,7 @@ Establish a reliable local desktop build with real Ollama on the user's laptop. 
 
 ## State after the gameplay pass
 
-Looping floors, guard awareness, ambushes, the Pulse Emitter, supplies, damaged records that ECHO reconstructs, Custodian terminals, truces and lockdowns, data fragments, a choice of last signal, scores and a daily seed are all implemented and tested (see docs/DESIGN.md). `--preview N` (1 game, 2 journal, 3 terminal, 4 transmit, 5 equipment, 6 new expedition) opens a screen directly for layout checks. Still to verify by hand: a full run with a real Ollama model, including asking it to read a damaged record and to answer a terminal.
+Looping floors, guard awareness, ambushes, the Pulse Emitter, supplies, damaged records that ECHO reconstructs, Custodian terminals, truces and lockdowns, data fragments, a choice of last signal, scores and a daily seed are all implemented and tested (see docs/DESIGN.md). `--preview N` (1 game, 2 journal, 3 terminal, 4 transmit, 5 equipment, 6 new expedition, 7 a lost run with its end screen and replay) opens a screen directly for layout checks. Still to verify by hand: a full run with a real Ollama model, including asking it to read a damaged record and to answer a terminal.
 
 ## Suggested next task
 
