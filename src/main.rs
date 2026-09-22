@@ -8,7 +8,7 @@ use std::{
 use the_last_signal::{
     ai,
     core::{
-        Awareness, EnemyKind, Faction, Game, Module, Outcome, PickupKind, Pos, Signal,
+        Awareness, Difficulty, EnemyKind, Faction, Game, Module, Outcome, PickupKind, Pos, Signal,
         TerminalState, Tile, ANALYZE_COST, CHALLENGES, FLOORS, FLOOR_NAMES, FRAGMENT_BASE, HEIGHT,
         PULSE_COST, RECORD_AUTHORS, SCAN_COST, WIDTH,
     },
@@ -321,7 +321,7 @@ fn draw_map(g: &Game, route: &[Pos]) {
         draw_rectangle(
             30. + e.pos.x as f32 * 19.,
             110. + e.pos.y as f32 * 19.,
-            15. * (e.hp.clamp(0, e.kind.max_hp(g.floor)) as f32 / e.kind.max_hp(g.floor) as f32),
+            15. * (e.hp.clamp(0, g.foe_hp(e.kind)) as f32 / g.foe_hp(e.kind) as f32),
             3.,
             CORAL,
         );
@@ -427,9 +427,16 @@ async fn main() {
         .find(|w| w[0] == "--seed")
         .and_then(|w| w[1].parse().ok())
         .unwrap_or_else(seed);
+    let mut difficulty = args
+        .windows(2)
+        .find(|w| w[0] == "--difficulty")
+        .and_then(|w| Difficulty::parse(&w[1]))
+        .unwrap_or_default();
     init_font();
     let mut loadout = the_last_signal::core::default_loadout();
-    let mut g = Game::new_with(initial_seed, &loadout);
+    let mut g = Game::new_with_difficulty(initial_seed, &loadout, difficulty);
+    // Digits typed into the seed field on the new-expedition screen.
+    let mut seed_text = String::new();
     let mut screen = Screen::Title;
     // Developer aid: `--preview N` opens screen N on a revealed map with one record
     // recovered, so layouts can be checked without playing to them.
@@ -572,7 +579,12 @@ async fn main() {
             MUTED,
         );
         text(
-            &format!("SEED {}   /   TURN {:03}", g.seed, g.turn),
+            &format!(
+                "SEED {}   /   TURN {:03}   /   {}",
+                g.seed,
+                g.turn,
+                g.difficulty.name().to_uppercase()
+            ),
             29.,
             90.,
             15.,
@@ -1295,7 +1307,7 @@ async fn main() {
                         text(m.effect(), 370., y + 42., 16., MUTED);
                         if hit && !chosen {
                             loadout = vec![*m];
-                            g = Game::new_with(g.seed, &loadout);
+                            g = Game::new_with_difficulty(g.seed, &loadout, g.difficulty);
                         }
                     }
                     if button("DONE / ESC", Rect::new(217., 603., 200., 40.), true)
@@ -1366,30 +1378,79 @@ async fn main() {
                 }
                 Screen::NewConfirm => {
                     text("START A NEW EXPEDITION?", 217., 190., 32., LIGHT);
-                    wrapped("Unsaved progress in this window will be replaced. Your existing save file stays unchanged until you press F5.",217.,260.,77,21.,MUTED,4);
-                    if button("NEW SEED", Rect::new(217., 410., 230., 42.), true) {
-                        g = Game::new_with(seed(), &loadout);
+                    wrapped("Unsaved progress in this window will be replaced. Your existing save file stays unchanged until you press F5.",217.,240.,77,19.,MUTED,2);
+                    text("DIFFICULTY", 217., 312., 16., MUTED);
+                    for (i, d) in Difficulty::ALL.iter().enumerate() {
+                        let r = Rect::new(217. + i as f32 * 183., 322., 170., 34.);
+                        if button(
+                            &if *d == difficulty {
+                                format!("* {}", d.name().to_uppercase())
+                            } else {
+                                d.name().to_uppercase()
+                            },
+                            r,
+                            true,
+                        ) {
+                            difficulty = *d;
+                        }
+                    }
+                    wrapped(difficulty.about(), 217., 380., 92, 16., AMBER, 2);
+                    let mut start = |g: &mut Game, new_seed: u64, note: &str| {
+                        *g = Game::new_with_difficulty(new_seed, &loadout, difficulty);
                         run_recorded = false;
                         screen = Screen::Game;
                         prompt.clear();
                         scroll = 0;
-                        status =
-                            "New expedition started. Your existing disk save is unchanged.".into();
+                        status = note.to_string();
+                    };
+                    if button("NEW SEED", Rect::new(217., 425., 230., 42.), true) {
+                        start(
+                            &mut g,
+                            seed(),
+                            "New expedition started. Your existing disk save is unchanged.",
+                        );
                     }
-                    if button("DAILY SIGNAL", Rect::new(217., 470., 230., 42.), true) {
+                    if button("DAILY SIGNAL", Rect::new(217., 485., 230., 42.), true) {
                         // Same complex for everyone today: compare scores.
                         let day = (macroquad::miniquad::date::now() / 86_400.) as u64;
-                        g = Game::new_with(20_000_000 + day, &loadout);
-                        run_recorded = false;
-                        screen = Screen::Game;
-                        prompt.clear();
-                        scroll = 0;
-                        status =
-                            "Daily signal: everyone gets this same complex today. Compare scores."
-                                .into();
+                        start(
+                            &mut g,
+                            20_000_000 + day,
+                            "Daily signal: everyone gets this same complex today. Compare scores.",
+                        );
                     }
-                    wrapped("Daily signal: one shared seed per day, the same complex for everyone. Your score is shown when the run ends.", 469., 488., 70, 16., MUTED, 2);
-                    if button("CANCEL / ESC", Rect::new(469., 410., 230., 42.), true)
+                    wrapped("Daily signal: one shared seed per day, the same complex for everyone. Your score is shown when the run ends.", 469., 503., 70, 16., MUTED, 2);
+                    // A typed seed: replay a run you liked, or one a friend named.
+                    let field = Rect::new(217., 545., 230., 42.);
+                    draw_rectangle(field.x, field.y, field.w, field.h, INK);
+                    draw_rectangle_lines(field.x, field.y, field.w, field.h, 1., TEAL);
+                    if seed_text.is_empty() {
+                        text("Type a seed...", 229., 572., 17., MUTED);
+                    } else {
+                        text(&seed_text, 229., 572., 17., LIGHT);
+                    }
+                    while let Some(c) = get_char_pressed() {
+                        if c.is_ascii_digit() && seed_text.len() < 18 {
+                            seed_text.push(c);
+                        }
+                    }
+                    if is_key_pressed(KeyCode::Backspace) {
+                        seed_text.pop();
+                    }
+                    let typed = seed_text.parse::<u64>().ok();
+                    if button(
+                        "START WITH SEED",
+                        Rect::new(469., 545., 230., 42.),
+                        typed.is_some(),
+                    ) || (typed.is_some() && is_key_pressed(KeyCode::Enter))
+                    {
+                        start(
+                            &mut g,
+                            typed.unwrap_or_default(),
+                            "Expedition started from your seed. Same seed, same complex, every time.",
+                        );
+                    }
+                    if button("CANCEL / ESC", Rect::new(469., 425., 230., 42.), true)
                         || is_key_pressed(KeyCode::Escape)
                     {
                         screen = Screen::Game;

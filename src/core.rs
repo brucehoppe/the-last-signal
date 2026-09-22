@@ -408,6 +408,60 @@ impl Signal {
 }
 /// A player action. The ordered list of these plus the seed and loadout is
 /// enough to replay a whole expedition.
+/// How hard the complex pushes back. Chosen before a run and fixed for it:
+/// it is part of what a seed replays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Difficulty {
+    Gentle,
+    #[default]
+    Standard,
+    Hard,
+}
+impl Difficulty {
+    pub const ALL: [Difficulty; 3] = [Difficulty::Gentle, Difficulty::Standard, Difficulty::Hard];
+    pub fn name(self) -> &'static str {
+        match self {
+            Difficulty::Gentle => "Gentle",
+            Difficulty::Standard => "Standard",
+            Difficulty::Hard => "Hard",
+        }
+    }
+    pub fn about(self) -> &'static str {
+        match self {
+            Difficulty::Gentle => {
+                "Foes have 2 less health. Score x0.75. Good for learning the complex."
+            }
+            Difficulty::Standard => "The expedition as designed. Full score.",
+            Difficulty::Hard => {
+                "Foes have 2 more health and an extra sentinel guards floors 2 and 3. Score x1.25."
+            }
+        }
+    }
+    /// Added to every foe's maximum health.
+    pub fn hp_bonus(self) -> i32 {
+        match self {
+            Difficulty::Gentle => -2,
+            Difficulty::Standard => 0,
+            Difficulty::Hard => 2,
+        }
+    }
+    /// One more sentinel post stays manned per floor below the first.
+    fn extra_posts(self) -> usize {
+        usize::from(self == Difficulty::Hard)
+    }
+    pub fn score_percent(self) -> i32 {
+        match self {
+            Difficulty::Gentle => 75,
+            Difficulty::Standard => 100,
+            Difficulty::Hard => 125,
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|d| d.name().eq_ignore_ascii_case(s.trim()))
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
     Move(i32, i32),
@@ -514,6 +568,8 @@ pub struct Game {
     /// behaviour. Never set in play.
     #[serde(default)]
     pub predictable: bool,
+    #[serde(default)]
+    pub difficulty: Difficulty,
 }
 struct Rng(u64);
 impl Rng {
@@ -533,6 +589,9 @@ impl Game {
         Self::new_with(seed, &default_loadout())
     }
     pub fn new_with(seed: u64, starter: &[Module]) -> Self {
+        Self::new_with_difficulty(seed, starter, Difficulty::Standard)
+    }
+    pub fn new_with_difficulty(seed: u64, starter: &[Module], difficulty: Difficulty) -> Self {
         let mut fitted: Vec<Module> = vec![];
         for m in starter {
             if !fitted.contains(m) && fitted.is_empty() {
@@ -574,9 +633,14 @@ impl Game {
             ambush_spots: vec![],
             reinforcements: 0,
             predictable: false,
+            difficulty,
         };
         g.build_floor(0);
         g
+    }
+    /// A foe's full health on this floor at this difficulty.
+    pub fn foe_hp(&self, kind: EnemyKind) -> i32 {
+        (kind.max_hp(self.floor) + self.difficulty.hp_bonus()).max(3)
     }
     /// Module slots open on the current floor.
     pub fn slots(&self) -> usize {
@@ -655,24 +719,25 @@ impl Game {
         // Deeper floors trade sentinels for tougher foes instead of adding to the crowd.
         let mut posts: Vec<usize> = others[..3].to_vec();
         posts.insert(0, spare_room);
-        for &room in posts.iter().skip(floor) {
+        let manned = floor.saturating_sub(self.difficulty.extra_posts());
+        for &room in posts.iter().skip(manned) {
             self.enemies.push(Enemy::new(
                 centers[room].offset(2, 1),
                 EnemyKind::Sentinel,
-                EnemyKind::Sentinel.max_hp(floor),
+                self.foe_hp(EnemyKind::Sentinel),
             ));
         }
         self.enemies.push(Enemy::new(
             centers[relay_room].offset(2, 1),
             EnemyKind::Sentinel,
-            EnemyKind::Sentinel.max_hp(floor) + 2,
+            self.foe_hp(EnemyKind::Sentinel) + 2,
         ));
         // Hunters join from floor 2: one more on each deeper floor.
         for h in 0..floor {
             self.enemies.push(Enemy::new(
                 centers[others[h]].offset(-2, -1),
                 EnemyKind::Hunter,
-                EnemyKind::Hunter.max_hp(floor),
+                self.foe_hp(EnemyKind::Hunter),
             ));
         }
         // The Overseer guards the final relay.
@@ -680,7 +745,7 @@ impl Game {
             self.enemies.push(Enemy::new(
                 centers[relay_room].offset(-2, 1),
                 EnemyKind::Overseer,
-                EnemyKind::Overseer.max_hp(floor),
+                self.foe_hp(EnemyKind::Overseer),
             ));
         }
         // One cache per floor, always holding a module you do not have yet.
@@ -871,8 +936,13 @@ impl Game {
             Action::Transmit(s) => self.transmit(s),
         }
     }
-    pub fn replay(seed: u64, loadout: &[Module], actions: &[Action]) -> Self {
-        let mut g = Self::new_with(seed, loadout);
+    pub fn replay(
+        seed: u64,
+        loadout: &[Module],
+        difficulty: Difficulty,
+        actions: &[Action],
+    ) -> Self {
+        let mut g = Self::new_with_difficulty(seed, loadout, difficulty);
         for &a in actions {
             g.apply(a);
         }
@@ -884,7 +954,7 @@ impl Game {
         if !self.replayable {
             return false;
         }
-        let r = Self::replay(self.seed, &self.loadout, &self.actions);
+        let r = Self::replay(self.seed, &self.loadout, self.difficulty, &self.actions);
         r.player == self.player
             && r.hp == self.hp
             && r.medkits == self.medkits
@@ -1354,7 +1424,7 @@ impl Game {
             + self.terminals_solved as i32 * 100
             + self.standing.iter().sum::<i32>() * 10
             + self.floor as i32 * 150;
-        match self.outcome {
+        let total = match self.outcome {
             Outcome::Escaped => {
                 base + 1000
                     + self.hp * 5
@@ -1367,7 +1437,8 @@ impl Game {
                     - (self.turn / 4) as i32
             }
             _ => base,
-        }
+        };
+        total * self.difficulty.score_percent() / 100
     }
     /// True when a terminal that still accepts an answer is within reach.
     pub fn terminal_in_reach(&self) -> bool {
@@ -1712,7 +1783,7 @@ impl Game {
     /// The Overseer calls a sentinel to the relay when it first turns on you,
     /// and again when it is badly hurt.
     fn overseer_calls(&mut self, i: usize) {
-        let hurt = self.enemies[i].hp * 2 <= EnemyKind::Overseer.max_hp(self.floor);
+        let hurt = self.enemies[i].hp * 2 <= self.foe_hp(EnemyKind::Overseer);
         let due = match self.reinforcements {
             0 => true,
             1 => hurt,
@@ -1742,7 +1813,7 @@ impl Game {
                 && !self.enemies.iter().any(|e| e.pos == *q)
         });
         let Some(q) = spot else { return };
-        let hp = EnemyKind::Sentinel.max_hp(self.floor);
+        let hp = self.foe_hp(EnemyKind::Sentinel);
         let mut sentinel = Enemy::new(q, EnemyKind::Sentinel, hp);
         sentinel.awareness = Awareness::Alert;
         sentinel.last_seen = Some(self.player);
@@ -1779,7 +1850,7 @@ impl Game {
                     self.floor(*q) && *q != self.player && !self.enemies.iter().any(|e| e.pos == *q)
                 });
             let Some(q) = spot else { break };
-            let mut hunter = Enemy::new(q, EnemyKind::Hunter, EnemyKind::Hunter.max_hp(self.floor));
+            let mut hunter = Enemy::new(q, EnemyKind::Hunter, self.foe_hp(EnemyKind::Hunter));
             hunter.awareness = Awareness::Alert;
             hunter.last_seen = Some(self.player);
             self.enemies.push(hunter);
@@ -1850,7 +1921,7 @@ impl Game {
                 // two thirds of its health gone.
                 let (num, den) = [(1, 2), (1, 3), (2, 3)][self.roll(i, 1, 3) as usize];
                 if kind == EnemyKind::Sentinel
-                    && self.enemies[i].hp * den <= kind.max_hp(self.floor) * num
+                    && self.enemies[i].hp * den <= self.foe_hp(kind) * num
                 {
                     if let Some(ally) = self.ally_to_fall_back_on(i) {
                         if !self.enemies[i].retreating {
@@ -2201,7 +2272,7 @@ impl Game {
                 || e.pos == self.player
                 || !positions.insert(e.pos)
                 || e.hp <= 0
-                || e.hp > 20
+                || e.hp > 22
             {
                 return Err("Invalid sentinel".into());
             }
@@ -2261,8 +2332,8 @@ mod tests {
         for seed in 0..100 {
             let mut g = Game::new(seed);
             for floor in 0..FLOORS {
-                g.build_floor(floor);
                 g.floor = floor;
+                g.build_floor(floor);
                 g.validate().unwrap();
                 let mut reached = HashSet::from([g.player]);
                 let mut q = VecDeque::from([g.player]);
@@ -2280,6 +2351,41 @@ mod tests {
                 assert!(g.enemies.iter().all(|e| reached.contains(&e.pos)));
             }
         }
+    }
+    #[test]
+    fn difficulty_changes_foes_and_score_and_replays() {
+        let gentle = Game::new_with_difficulty(9, &[Module::Shield], Difficulty::Gentle);
+        let standard = Game::new(9);
+        let hard = Game::new_with_difficulty(9, &[Module::Shield], Difficulty::Hard);
+        assert_eq!(gentle.foe_hp(EnemyKind::Sentinel), 4);
+        assert_eq!(standard.foe_hp(EnemyKind::Sentinel), 6);
+        assert_eq!(hard.foe_hp(EnemyKind::Sentinel), 8);
+        assert_eq!(gentle.tiles, hard.tiles, "difficulty never changes the map");
+        assert_eq!(gentle.enemies.len(), standard.enemies.len());
+        let mut hard2 = hard.clone();
+        hard2.floor = 1;
+        hard2.build_floor(1);
+        let mut std2 = standard.clone();
+        std2.floor = 1;
+        std2.build_floor(1);
+        assert_eq!(
+            hard2.enemies.len(),
+            std2.enemies.len() + 1,
+            "hard mans one more post"
+        );
+        hard2.validate().unwrap();
+        let mut g = hard.clone();
+        g.step(1, 0);
+        g.wait();
+        assert!(g.replay_matches());
+        let mut cheaper = g.clone();
+        cheaper.difficulty = Difficulty::Standard;
+        assert!(
+            !cheaper.replay_matches(),
+            "replay must use the run's difficulty"
+        );
+        assert_eq!(hard.score() * 100 / 125, standard.score());
+        assert_eq!(Difficulty::parse(" hard "), Some(Difficulty::Hard));
     }
     #[test]
     fn hidden_records_and_threats_are_not_sent() {
@@ -2375,6 +2481,7 @@ mod tests {
         let mut kinds = vec![];
         for floor in 0..FLOORS {
             let mut g = Game::new(21);
+            g.floor = floor;
             g.build_floor(floor);
             let count = |k| g.enemies.iter().filter(|e| e.kind == k).count();
             kinds.push((
